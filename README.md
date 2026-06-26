@@ -33,6 +33,7 @@ MIT License
   - [Using with PgBouncer](guides/Getting%20Started.md#using-with-pg-bouncer)
 - [Using the EventStore](guides/Usage.md)
   - [Writing to a stream](guides/Usage.md#writing-to-a-stream)
+    - [Using correlation and causation identifiers](guides/Usage.md#using-correlation-and-causation-identifiers)
     - [Appending events to an existing stream](guides/Usage.md#appending-events-to-an-existing-stream)
   - [Reading from a stream](guides/Usage.md#reading-from-a-stream)
   - [Reading from all streams](guides/Usage.md#reading-from-all-streams)

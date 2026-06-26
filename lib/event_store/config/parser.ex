@@ -3,6 +3,8 @@ defmodule EventStore.Config.Parser do
 
   @config_defaults [
     column_data_type: "bytea",
+    correlation_id_type: "uuid",
+    causation_id_type: "uuid",
     enable_hard_deletes: false,
     schema: "public",
     timeout: 15_000

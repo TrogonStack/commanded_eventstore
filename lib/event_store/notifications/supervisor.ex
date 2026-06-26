@@ -23,6 +23,8 @@ defmodule EventStore.Notifications.Supervisor do
     schema = Keyword.fetch!(config, :schema)
     serializer = Keyword.fetch!(config, :serializer)
     query_timeout = Keyword.fetch!(config, :timeout)
+    correlation_id_type = Keyword.get(config, :correlation_id_type, "uuid")
+    causation_id_type = Keyword.get(config, :causation_id_type, "uuid")
 
     listener_name = Module.concat([event_store, Listener])
     publisher_name = Module.concat([event_store, Publisher])
@@ -54,6 +56,8 @@ defmodule EventStore.Notifications.Supervisor do
          event_store: event_store,
          schema: schema,
          serializer: serializer,
+         correlation_id_type: correlation_id_type,
+         causation_id_type: causation_id_type,
          subscribe_to: listener_name,
          name: publisher_name,
          hibernate_after: hibernate_after}

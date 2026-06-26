@@ -18,6 +18,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         subscription_name: subscription_name,
         serializer: Keyword.fetch!(opts, :serializer),
         schema: Keyword.fetch!(opts, :schema),
+        correlation_id_type: Keyword.get(opts, :correlation_id_type, "uuid"),
+        causation_id_type: Keyword.get(opts, :causation_id_type, "uuid"),
         start_from: opts[:start_from] || 0,
         mapper: opts[:mapper],
         selector: opts[:selector],
@@ -458,13 +460,17 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       stream_uuid: stream_uuid,
       last_sent: last_sent,
       max_size: max_size,
-      query_timeout: query_timeout
+      query_timeout: query_timeout,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
     } = data
 
     Stream.read_stream_forward(conn, stream_uuid, last_sent + 1, max_size,
       schema: schema,
       serializer: serializer,
-      timeout: query_timeout
+      timeout: query_timeout,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
     )
   end
 

@@ -47,6 +47,64 @@ Append the events to the stream:
 :ok = EventStore.append_to_stream(stream_uuid, expected_version, events)
 ```
 
+### Using correlation and causation identifiers
+
+`EventStore.EventData` supports `correlation_id` and `causation_id` fields.
+
+By default EventStore stores both fields using PostgreSQL's `uuid` type. If your
+application already uses UUID values for correlation and causation, no
+additional configuration is needed.
+
+When the natural workflow identifier is already a string, you can configure
+either field independently to use `text`:
+
+```elixir
+config :my_app, MyApp.EventStore,
+  correlation_id_type: "text",
+  causation_id_type: "text"
+```
+
+For example, an order checkout workflow may write events to different streams
+while keeping the same `correlation_id`:
+
+```elixir
+alias EventStore.EventData
+
+order_id = "ORD-2026-000123"
+
+:ok =
+  MyApp.EventStore.append_to_stream("order-#{order_id}", 0, [
+    %EventData{
+      event_type: "OrderPlaced",
+      correlation_id: "order:#{order_id}",
+      causation_id: "checkout:web:req-42",
+      data: %{order_id: order_id},
+      metadata: %{}
+    }
+  ])
+```
+
+Later, a payment event written to another stream can keep the same
+`correlation_id` even though the stream is different:
+
+```elixir
+:ok =
+  MyApp.EventStore.append_to_stream("payment-pay_01jxyz...", 0, [
+    %EventData{
+      event_type: "PaymentCaptured",
+      correlation_id: "order:#{order_id}",
+      causation_id: "payment:pay_01jxyz...",
+      data: %{payment_id: "pay_01jxyz..."},
+      metadata: %{}
+    }
+  ])
+```
+
+In this example the stream names are different, but the workflow identifier is
+the same. This allows application code to carry a meaningful correlation value
+across order and payment events without introducing a separate metadata field
+just because the identifier is not a UUID.
+
 ### Appending events to an existing stream
 
 The expected version should equal the number of events already persisted to the stream when appending to an existing stream.

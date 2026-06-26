@@ -14,12 +14,16 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       {:ok, events} =
         Stream.read_stream_forward(conn, stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert length(events) == 3
@@ -29,6 +33,8 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       utc_now = DateTime.utc_now()
@@ -36,7 +42,9 @@ defmodule EventStore.Streams.SingleStreamTest do
       {:ok, [event]} =
         Stream.read_stream_forward(conn, stream_uuid, 0, 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       created_at = event.created_at
@@ -56,13 +64,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       events: events,
       stream_uuid: stream_uuid
     } do
       assert {:error, :wrong_expected_version} =
                Stream.append_to_stream(conn, stream_uuid, 0, events,
                  schema: schema,
-                 serializer: serializer
+                 serializer: serializer,
+                 correlation_id_type: cit,
+                 causation_id_type: cait
                )
     end
   end
@@ -77,13 +89,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: source_stream_uuid,
       other_stream_uuid: target_stream_uuid
     } do
       {:ok, source_events} =
         Stream.read_stream_forward(conn, source_stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert :ok =
@@ -92,7 +108,9 @@ defmodule EventStore.Streams.SingleStreamTest do
       assert {:ok, events} =
                Stream.read_stream_forward(conn, target_stream_uuid, 0, 1_000,
                  schema: schema,
-                 serializer: serializer
+                 serializer: serializer,
+                 correlation_id_type: cit,
+                 causation_id_type: cait
                )
 
       assert length(events) == 4
@@ -116,13 +134,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: source_stream_uuid,
       other_stream_uuid: target_stream_uuid
     } do
       {:ok, source_events} =
         Stream.read_stream_forward(conn, source_stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert :ok =
@@ -135,13 +157,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: source_stream_uuid,
       other_stream_uuid: target_stream_uuid
     } do
       {:ok, source_events} =
         Stream.read_stream_forward(conn, source_stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert {:error, :wrong_expected_version} =
@@ -160,13 +186,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: source_stream_uuid,
       other_stream_uuid: target_stream_uuid
     } do
       {:ok, source_events} =
         Stream.read_stream_forward(conn, source_stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       :ok = Stream.link_to_stream(conn, target_stream_uuid, 1, source_events, schema: schema)
@@ -179,6 +209,8 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       {:ok, _subscription} =
@@ -194,7 +226,9 @@ defmodule EventStore.Streams.SingleStreamTest do
       :ok =
         Stream.append_to_stream(conn, stream_uuid, :any_version, [event],
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert_receive {:events, [received_event | _]}
@@ -205,21 +239,27 @@ defmodule EventStore.Streams.SingleStreamTest do
   test "attempt to read an unknown stream forward should error stream not found", %{
     conn: conn,
     schema: schema,
-    serializer: serializer
+    serializer: serializer,
+    correlation_id_type: cit,
+    causation_id_type: cait
   } do
     unknown_stream_uuid = UUID.uuid4()
 
     assert {:error, :stream_not_found} =
              Stream.read_stream_forward(conn, unknown_stream_uuid, 0, 1,
                schema: schema,
-               serializer: serializer
+               serializer: serializer,
+               correlation_id_type: cit,
+               causation_id_type: cait
              )
   end
 
   test "attempt to stream an unknown stream should error stream not found", %{
     conn: conn,
     schema: schema,
-    serializer: serializer
+    serializer: serializer,
+    correlation_id_type: cit,
+    causation_id_type: cait
   } do
     unknown_stream_uuid = UUID.uuid4()
 
@@ -227,7 +267,9 @@ defmodule EventStore.Streams.SingleStreamTest do
              Stream.stream_forward(conn, unknown_stream_uuid, 0,
                read_batch_size: 1,
                schema: schema,
-               serializer: serializer
+               serializer: serializer,
+               correlation_id_type: cit,
+               causation_id_type: cait
              )
   end
 
@@ -238,12 +280,16 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       {:ok, read_events} =
         Stream.read_stream_forward(conn, stream_uuid, 0, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert length(read_events) == 3
@@ -258,12 +304,16 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       {:ok, read_events} =
         Stream.read_stream_backward(conn, stream_uuid, -1, 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert length(read_events) == 3
@@ -278,13 +328,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_forward(conn, stream_uuid, 0,
           read_batch_size: 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -297,13 +351,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_forward(conn, stream_uuid, 0,
           read_batch_size: 2,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -314,13 +372,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_forward(conn, stream_uuid, 0,
           read_batch_size: 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -331,13 +393,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_forward(conn, stream_uuid, 2,
           read_batch_size: 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -347,12 +413,21 @@ defmodule EventStore.Streams.SingleStreamTest do
     end
 
     test "should stream events from single stream with starting version offset outside range",
-         %{conn: conn, schema: schema, serializer: serializer, stream_uuid: stream_uuid} do
+         %{
+           conn: conn,
+           schema: schema,
+           serializer: serializer,
+           correlation_id_type: cit,
+           causation_id_type: cait,
+           stream_uuid: stream_uuid
+         } do
       read_events =
         Stream.stream_forward(conn, stream_uuid, 4,
           read_batch_size: 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -367,13 +442,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_backward(conn, stream_uuid, -1,
           read_batch_size: 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -386,13 +465,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_backward(conn, stream_uuid, -1,
           read_batch_size: 2,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -405,13 +488,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_backward(conn, stream_uuid, -1,
           read_batch_size: 1_000,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -424,13 +511,17 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       read_events =
         Stream.stream_backward(conn, stream_uuid, 2,
           read_batch_size: 2,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -440,12 +531,21 @@ defmodule EventStore.Streams.SingleStreamTest do
     end
 
     test "should stream events from single stream with starting version offset outside range",
-         %{conn: conn, schema: schema, serializer: serializer, stream_uuid: stream_uuid} do
+         %{
+           conn: conn,
+           schema: schema,
+           serializer: serializer,
+           correlation_id_type: cit,
+           causation_id_type: cait,
+           stream_uuid: stream_uuid
+         } do
       read_events =
         Stream.stream_backward(conn, stream_uuid, 0,
           read_batch_size: 1,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
         |> Enum.to_list()
 
@@ -474,6 +574,8 @@ defmodule EventStore.Streams.SingleStreamTest do
       conn: conn,
       schema: schema,
       serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait,
       stream_uuid: stream_uuid
     } do
       {:ok, _subscription} =
@@ -491,7 +593,9 @@ defmodule EventStore.Streams.SingleStreamTest do
       :ok =
         Stream.append_to_stream(conn, stream_uuid, 3, events,
           schema: schema,
-          serializer: serializer
+          serializer: serializer,
+          correlation_id_type: cit,
+          causation_id_type: cait
         )
 
       assert_receive {:events, received_events}
@@ -507,14 +611,22 @@ defmodule EventStore.Streams.SingleStreamTest do
     end
   end
 
-  test "should return stream version", %{conn: conn, schema: schema, serializer: serializer} do
+  test "should return stream version", %{
+    conn: conn,
+    schema: schema,
+    serializer: serializer,
+    correlation_id_type: cit,
+    causation_id_type: cait
+  } do
     stream_uuid = UUID.uuid4()
     events = EventFactory.create_events(3)
 
     :ok =
       Stream.append_to_stream(conn, stream_uuid, 0, events,
         schema: schema,
-        serializer: serializer
+        serializer: serializer,
+        correlation_id_type: cit,
+        causation_id_type: cait
       )
 
     # stream above needed for preventing accidental event_number/stream_version match
@@ -524,14 +636,22 @@ defmodule EventStore.Streams.SingleStreamTest do
     :ok =
       Stream.append_to_stream(conn, stream_uuid, 0, events,
         schema: schema,
-        serializer: serializer
+        serializer: serializer,
+        correlation_id_type: cit,
+        causation_id_type: cait
       )
 
     assert {:ok, 3} = Stream.stream_version(conn, stream_uuid, schema: schema)
   end
 
   defp append_events_to_stream(context) do
-    %{conn: conn, schema: schema, serializer: serializer} = context
+    %{
+      conn: conn,
+      schema: schema,
+      serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    } = context
 
     stream_uuid = UUID.uuid4()
     events = EventFactory.create_events(3)
@@ -539,7 +659,9 @@ defmodule EventStore.Streams.SingleStreamTest do
     :ok =
       Stream.append_to_stream(conn, stream_uuid, 0, events,
         schema: schema,
-        serializer: serializer
+        serializer: serializer,
+        correlation_id_type: cit,
+        causation_id_type: cait
       )
 
     [
@@ -549,7 +671,13 @@ defmodule EventStore.Streams.SingleStreamTest do
   end
 
   defp append_event_to_another_stream(context) do
-    %{conn: conn, schema: schema, serializer: serializer} = context
+    %{
+      conn: conn,
+      schema: schema,
+      serializer: serializer,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    } = context
 
     stream_uuid = UUID.uuid4()
     events = EventFactory.create_events(1)
@@ -557,7 +685,9 @@ defmodule EventStore.Streams.SingleStreamTest do
     :ok =
       Stream.append_to_stream(conn, stream_uuid, 0, events,
         schema: schema,
-        serializer: serializer
+        serializer: serializer,
+        correlation_id_type: cit,
+        causation_id_type: cait
       )
 
     [

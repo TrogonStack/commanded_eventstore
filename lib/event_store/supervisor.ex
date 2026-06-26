@@ -118,6 +118,8 @@ defmodule EventStore.Supervisor do
   defp validate_config!(event_store, name, config) do
     conn = postgrex_conn(name, config)
     column_data_type = Config.column_data_type(event_store, config)
+    correlation_id_type = Config.correlation_id_type(event_store, config)
+    causation_id_type = Config.causation_id_type(event_store, config)
     serializer = Serializer.serializer(event_store, config)
     subscription_retry_interval = Subscriptions.retry_interval(event_store, config)
     subscription_hibernate_after = Subscriptions.hibernate_after(event_store, config)
@@ -125,6 +127,8 @@ defmodule EventStore.Supervisor do
     Keyword.merge(config,
       conn: conn,
       column_data_type: column_data_type,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type,
       serializer: serializer,
       subscription_retry_interval: subscription_retry_interval,
       subscription_hibernate_after: subscription_hibernate_after

@@ -18,8 +18,8 @@ defmodule EventStore.EventData do
 
   @type t :: %EventData{
           event_id: uuid() | nil,
-          correlation_id: uuid() | nil,
-          causation_id: uuid() | nil,
+          correlation_id: String.t() | nil,
+          causation_id: String.t() | nil,
           event_type: String.t(),
           data: term,
           metadata: term | nil

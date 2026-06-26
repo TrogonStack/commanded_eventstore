@@ -14,9 +14,9 @@ defmodule EventStore.RecordedEvent do
     - `event_id` - a globally unique UUID to identify the event.
     - `stream_uuid` - the original stream identity for the event.
     - `stream_version` - the original version of the stream for the event.
-    - `correlation_id` - an optional UUID identifier used to correlate related
+    - `correlation_id` - an optional string identifier used to correlate related
       messages.
-    - `causation_id` - an optional UUID identifier used to identify which
+    - `causation_id` - an optional string identifier used to identify which
       message you are responding to.
     - `data` - the deserialized event data.
     - `metadata` - a deserialized map of event metadata.
@@ -34,8 +34,8 @@ defmodule EventStore.RecordedEvent do
           event_id: uuid(),
           stream_uuid: String.t(),
           stream_version: non_neg_integer(),
-          correlation_id: uuid() | nil,
-          causation_id: uuid() | nil,
+          correlation_id: String.t() | nil,
+          causation_id: String.t() | nil,
           event_type: String.t(),
           data: any(),
           metadata: map() | nil,

@@ -32,7 +32,7 @@ defmodule EventStore.Mixfile do
     ]
   end
 
-  defp elixirc_paths(env) when env in [:bench, :jsonb, :migration, :test],
+  defp elixirc_paths(env) when env in [:bench, :jsonb, :migration, :test, :text_ids],
     do: ["lib", "test/support", "test/subscriptions/support"]
 
   defp elixirc_paths(_env), do: ["lib"]
@@ -139,8 +139,9 @@ defmodule EventStore.Mixfile do
       "event_store.setup": ["event_store.create", "event_store.init"],
       "es.reset": ["event_store.reset"],
       "es.setup": ["event_store.setup"],
-      "test.all": ["test", "test.jsonb", "test.migration", "test --only slow"],
+      "test.all": ["test", "test.jsonb", "test.text_ids", "test.migration", "test --only slow"],
       "test.jsonb": &test_jsonb/1,
+      "test.text_ids": &test_text_ids/1,
       "test.migration": &test_migration/1
     ]
   end
@@ -149,6 +150,7 @@ defmodule EventStore.Mixfile do
     [
       "test.all": :test,
       "test.jsonb": :test,
+      "test.text_ids": :test,
       "test.migration": :test
     ]
   end
@@ -164,6 +166,7 @@ defmodule EventStore.Mixfile do
 
   defp test_migration(args), do: test_env(:migration, ["--include", "migration"] ++ args)
   defp test_jsonb(args), do: test_env(:jsonb, args)
+  defp test_text_ids(args), do: test_env(:text_ids, args)
 
   defp test_env(env, args) do
     test_args = if IO.ANSI.enabled?(), do: ["--color" | args], else: ["--no-color" | args]

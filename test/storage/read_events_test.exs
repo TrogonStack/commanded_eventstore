@@ -145,9 +145,13 @@ defmodule EventStore.Storage.ReadEventsTest do
   end
 
   defp append(context, stream_id, recorded_events) do
-    %{conn: conn, schema: schema} = context
+    %{conn: conn, schema: schema, correlation_id_type: cit, causation_id_type: cait} = context
 
-    Appender.append(conn, stream_id, recorded_events, schema: schema)
+    Appender.append(conn, stream_id, recorded_events,
+      schema: schema,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    )
   end
 
   defp create_stream(context) do
@@ -169,15 +173,23 @@ defmodule EventStore.Storage.ReadEventsTest do
   end
 
   defp read_all_stream_forward(context, start_version, count) do
-    %{conn: conn, schema: schema} = context
+    %{conn: conn, schema: schema, correlation_id_type: cit, causation_id_type: cait} = context
 
-    Storage.read_stream_forward(conn, 0, start_version, count, schema: schema)
+    Storage.read_stream_forward(conn, 0, start_version, count,
+      schema: schema,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    )
   end
 
   defp read_stream_forward(context, stream_id, start_version, count) do
-    %{conn: conn, schema: schema} = context
+    %{conn: conn, schema: schema, correlation_id_type: cit, causation_id_type: cait} = context
 
-    Storage.read_stream_forward(conn, stream_id, start_version, count, schema: schema)
+    Storage.read_stream_forward(conn, stream_id, start_version, count,
+      schema: schema,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    )
   end
 
   defp pluck(enumerable, field), do: Enum.map(enumerable, &Map.get(&1, field))

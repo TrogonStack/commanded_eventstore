@@ -160,7 +160,9 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
       schema: schema,
       event_store: event_store,
       serializer: serializer,
-      subscription_name: subscription_name
+      subscription_name: subscription_name,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
     } = context
 
     {:ok, subscription} =
@@ -169,6 +171,8 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
         conn: conn,
         schema: schema,
         serializer: serializer,
+        correlation_id_type: correlation_id_type,
+        causation_id_type: causation_id_type,
         retry_interval: 1_000,
         stream_uuid: "$all",
         subscription_name: subscription_name,

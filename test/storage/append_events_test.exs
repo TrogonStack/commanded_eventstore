@@ -4,38 +4,43 @@ defmodule EventStore.Storage.AppendEventsTest do
   alias EventStore.{EventFactory, RecordedEvent, UUID}
   alias EventStore.Storage.{Appender, CreateStream}
 
-  test "append single event to new stream", %{conn: conn, schema: schema} = context do
+  test "append single event to new stream", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
     recorded_events = EventFactory.create_recorded_events(1, stream_uuid)
 
-    assert :ok = Appender.append(conn, stream_id, recorded_events, schema: schema)
+    assert :ok = Appender.append(conn, stream_id, recorded_events, append_opts(context))
   end
 
-  test "append multiple events to new stream", %{conn: conn, schema: schema} = context do
+  test "append multiple events to new stream", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
     recorded_events = EventFactory.create_recorded_events(3, stream_uuid)
 
-    assert :ok = Appender.append(conn, stream_id, recorded_events, schema: schema)
+    assert :ok = Appender.append(conn, stream_id, recorded_events, append_opts(context))
   end
 
-  test "append single event to existing stream, in separate writes",
-       %{conn: conn, schema: schema} = context do
+  test "append single event to existing stream, in separate writes", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
 
     recorded_events1 = EventFactory.create_recorded_events(1, stream_uuid)
     recorded_events2 = EventFactory.create_recorded_events(1, stream_uuid, 2, 2)
 
-    assert :ok = Appender.append(conn, stream_id, recorded_events1, schema: schema)
-    assert :ok = Appender.append(conn, stream_id, recorded_events2, schema: schema)
+    assert :ok = Appender.append(conn, stream_id, recorded_events1, append_opts(context))
+    assert :ok = Appender.append(conn, stream_id, recorded_events2, append_opts(context))
   end
 
-  test "append multiple events to existing stream, in separate writes",
-       %{conn: conn, schema: schema} = context do
+  test "append multiple events to existing stream, in separate writes", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
 
     assert :ok =
-             Appender.append(conn, stream_id, EventFactory.create_recorded_events(3, stream_uuid),
-               schema: schema
+             Appender.append(
+               conn,
+               stream_id,
+               EventFactory.create_recorded_events(3, stream_uuid),
+               append_opts(context)
              )
 
     assert :ok =
@@ -43,11 +48,12 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream_id,
                EventFactory.create_recorded_events(3, stream_uuid, 4, 4),
-               schema: schema
+               append_opts(context)
              )
   end
 
-  test "append events to different, new streams", %{conn: conn, schema: schema} = context do
+  test "append events to different, new streams", context do
+    %{conn: conn} = context
     {:ok, stream1_uuid, stream1_id} = create_stream(context)
     {:ok, stream2_uuid, stream2_id} = create_stream(context)
 
@@ -56,7 +62,7 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream1_id,
                EventFactory.create_recorded_events(2, stream1_uuid),
-               schema: schema
+               append_opts(context)
              )
 
     assert :ok =
@@ -64,11 +70,12 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream2_id,
                EventFactory.create_recorded_events(2, stream2_uuid, 3),
-               schema: schema
+               append_opts(context)
              )
   end
 
-  test "append events to different, existing streams", %{conn: conn, schema: schema} = context do
+  test "append events to different, existing streams", context do
+    %{conn: conn} = context
     {:ok, stream1_uuid, stream1_id} = create_stream(context)
     {:ok, stream2_uuid, stream2_id} = create_stream(context)
 
@@ -77,7 +84,7 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream1_id,
                EventFactory.create_recorded_events(2, stream1_uuid),
-               schema: schema
+               append_opts(context)
              )
 
     assert :ok =
@@ -85,7 +92,7 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream2_id,
                EventFactory.create_recorded_events(2, stream2_uuid, 3),
-               schema: schema
+               append_opts(context)
              )
 
     assert :ok =
@@ -93,7 +100,7 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream1_id,
                EventFactory.create_recorded_events(2, stream1_uuid, 5, 3),
-               schema: schema
+               append_opts(context)
              )
 
     assert :ok =
@@ -101,46 +108,48 @@ defmodule EventStore.Storage.AppendEventsTest do
                conn,
                stream2_id,
                EventFactory.create_recorded_events(2, stream2_uuid, 7, 3),
-               schema: schema
+               append_opts(context)
              )
   end
 
-  test "append to new stream, but stream already exists",
-       %{conn: conn, schema: schema} = context do
+  test "append to new stream, but stream already exists", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
     events = EventFactory.create_recorded_events(1, stream_uuid)
 
-    :ok = Appender.append(conn, stream_id, events, schema: schema)
+    :ok = Appender.append(conn, stream_id, events, append_opts(context))
 
     events = EventFactory.create_recorded_events(1, stream_uuid)
 
     assert {:error, :wrong_expected_version} =
-             Appender.append(conn, stream_id, events, schema: schema)
+             Appender.append(conn, stream_id, events, append_opts(context))
   end
 
-  test "append to stream that does not exist", %{conn: conn, schema: schema} do
+  test "append to stream that does not exist", %{conn: conn} = context do
     stream_uuid = UUID.uuid4()
     stream_id = 1
     events = EventFactory.create_recorded_events(1, stream_uuid)
 
-    assert {:error, :not_found} = Appender.append(conn, stream_id, events, schema: schema)
+    assert {:error, :not_found} = Appender.append(conn, stream_id, events, append_opts(context))
   end
 
-  test "append to existing stream, but wrong expected version",
-       %{conn: conn, schema: schema} = context do
+  test "append to existing stream, but wrong expected version", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
     events = EventFactory.create_recorded_events(2, stream_uuid)
 
-    :ok = Appender.append(conn, stream_id, events, schema: schema)
+    :ok = Appender.append(conn, stream_id, events, append_opts(context))
 
     events = EventFactory.create_recorded_events(2, stream_uuid)
 
     assert {:error, :wrong_expected_version} =
-             Appender.append(conn, stream_id, events, schema: schema)
+             Appender.append(conn, stream_id, events, append_opts(context))
   end
 
-  test "append events to same stream concurrently", %{conn: conn, schema: schema} = context do
+  test "append events to same stream concurrently", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
+    opts = append_opts(context)
 
     results =
       1..5
@@ -148,7 +157,7 @@ defmodule EventStore.Storage.AppendEventsTest do
         Task.async(fn ->
           events = EventFactory.create_recorded_events(10, stream_uuid)
 
-          Appender.append(conn, stream_id, events, schema: schema)
+          Appender.append(conn, stream_id, events, opts)
         end)
       end)
       |> Enum.map(&Task.await/1)
@@ -163,37 +172,38 @@ defmodule EventStore.Storage.AppendEventsTest do
            ]
   end
 
-  test "append events to the same stream twice should fail",
-       %{conn: conn, schema: schema} = context do
+  test "append events to the same stream twice should fail", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
 
     events = EventFactory.create_recorded_events(3, stream_uuid)
-    :ok = Appender.append(conn, stream_id, events, schema: schema)
+    :ok = Appender.append(conn, stream_id, events, append_opts(context))
 
-    {:error, :duplicate_event} = Appender.append(conn, stream_id, events, schema: schema)
+    {:error, :duplicate_event} = Appender.append(conn, stream_id, events, append_opts(context))
   end
 
-  test "append existing events to the same stream should fail",
-       %{conn: conn, schema: schema} = context do
+  test "append existing events to the same stream should fail", context do
+    %{conn: conn} = context
     {:ok, stream_uuid, stream_id} = create_stream(context)
 
     events = EventFactory.create_recorded_events(3, stream_uuid)
-    :ok = Appender.append(conn, stream_id, events, schema: schema)
+    :ok = Appender.append(conn, stream_id, events, append_opts(context))
 
     for event <- events do
       events = [%RecordedEvent{event | stream_version: 4}]
 
-      assert {:error, :duplicate_event} = Appender.append(conn, stream_id, events, schema: schema)
+      assert {:error, :duplicate_event} =
+               Appender.append(conn, stream_id, events, append_opts(context))
     end
   end
 
-  test "append existing events to a different stream should fail",
-       %{conn: conn, schema: schema} = context do
+  test "append existing events to a different stream should fail", context do
+    %{conn: conn} = context
     {:ok, stream1_uuid, stream1_id} = create_stream(context)
     {:ok, stream2_uuid, stream2_id} = create_stream(context)
 
     events = EventFactory.create_recorded_events(3, stream1_uuid)
-    :ok = Appender.append(conn, stream1_id, events, schema: schema)
+    :ok = Appender.append(conn, stream1_id, events, append_opts(context))
 
     for event <- events do
       events = [
@@ -201,7 +211,7 @@ defmodule EventStore.Storage.AppendEventsTest do
       ]
 
       assert {:error, :duplicate_event} =
-               Appender.append(conn, stream2_id, events, schema: schema)
+               Appender.append(conn, stream2_id, events, append_opts(context))
     end
   end
 
@@ -229,5 +239,19 @@ defmodule EventStore.Storage.AppendEventsTest do
     with {:ok, stream_id} <- CreateStream.execute(conn, stream_uuid, schema: schema) do
       {:ok, stream_uuid, stream_id}
     end
+  end
+
+  defp append_opts(context) do
+    %{
+      schema: schema,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
+    } = context
+
+    [
+      schema: schema,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
+    ]
   end
 end

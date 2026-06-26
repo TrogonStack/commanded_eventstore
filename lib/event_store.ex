@@ -452,6 +452,8 @@ defmodule EventStore do
         conn = Keyword.fetch!(config, :conn)
         schema = Keyword.fetch!(config, :schema)
         serializer = Keyword.fetch!(config, :serializer)
+        correlation_id_type = Keyword.get(config, :correlation_id_type, "uuid")
+        causation_id_type = Keyword.get(config, :causation_id_type, "uuid")
 
         query_timeout = timeout(opts, config)
 
@@ -471,6 +473,8 @@ defmodule EventStore do
               query_timeout: query_timeout,
               schema: schema,
               serializer: serializer,
+              correlation_id_type: correlation_id_type,
+              causation_id_type: causation_id_type,
               stream_uuid: stream_uuid,
               subscription_name: subscription_name,
               start_from: start_from

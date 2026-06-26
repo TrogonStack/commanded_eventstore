@@ -14,7 +14,16 @@ defmodule EventStore.Notifications.Publisher do
   alias EventStore.Notifications.Notification
 
   defmodule State do
-    defstruct [:conn, :event_store, :query_timeout, :schema, :serializer, :subscribe_to]
+    defstruct [
+      :conn,
+      :event_store,
+      :query_timeout,
+      :schema,
+      :serializer,
+      :subscribe_to,
+      correlation_id_type: "uuid",
+      causation_id_type: "uuid"
+    ]
 
     def new(opts) do
       %State{
@@ -23,7 +32,9 @@ defmodule EventStore.Notifications.Publisher do
         query_timeout: Keyword.fetch!(opts, :query_timeout),
         schema: Keyword.fetch!(opts, :schema),
         serializer: Keyword.fetch!(opts, :serializer),
-        subscribe_to: Keyword.fetch!(opts, :subscribe_to)
+        subscribe_to: Keyword.fetch!(opts, :subscribe_to),
+        correlation_id_type: Keyword.get(opts, :correlation_id_type, "uuid"),
+        causation_id_type: Keyword.get(opts, :causation_id_type, "uuid")
       }
     end
   end
@@ -65,15 +76,23 @@ defmodule EventStore.Notifications.Publisher do
       to_stream_version: to_stream_version
     } = notification
 
-    %State{conn: conn, query_timeout: query_timeout, schema: schema, serializer: serializer} =
-      state
+    %State{
+      conn: conn,
+      query_timeout: query_timeout,
+      schema: schema,
+      serializer: serializer,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
+    } = state
 
     count = to_stream_version - from_stream_version + 1
 
     try do
       case Storage.read_stream_forward(conn, stream_id, from_stream_version, count,
              schema: schema,
-             timeout: query_timeout
+             timeout: query_timeout,
+             correlation_id_type: correlation_id_type,
+             causation_id_type: causation_id_type
            ) do
         {:ok, events} ->
           deserialized_events = deserialize_recorded_events(events, serializer)
