@@ -15,10 +15,12 @@ defmodule EventStore.Storage.Appender do
   """
   def append(conn, stream_id, events, opts) do
     [%RecordedEvent{stream_uuid: stream_uuid} | _] = events
+    {correlation_id_type, opts} = Keyword.pop(opts, :correlation_id_type, "uuid")
+    {causation_id_type, opts} = Keyword.pop(opts, :causation_id_type, "uuid")
 
     try do
       events
-      |> Stream.map(&encode_uuids/1)
+      |> Stream.map(&encode_uuids(&1, correlation_id_type, causation_id_type))
       |> Stream.chunk_every(1_000)
       |> Enum.reduce(stream_id, fn batch, stream_id ->
         event_count = length(batch)
@@ -83,17 +85,21 @@ defmodule EventStore.Storage.Appender do
     end
   end
 
-  defp encode_uuids(%RecordedEvent{} = event) do
+  defp encode_uuids(%RecordedEvent{} = event, correlation_id_type, causation_id_type) do
     %RecordedEvent{event_id: event_id, causation_id: causation_id, correlation_id: correlation_id} =
       event
 
     %RecordedEvent{
       event
       | event_id: encode_uuid(event_id),
-        causation_id: encode_uuid(causation_id),
-        correlation_id: encode_uuid(correlation_id)
+        causation_id: encode_id(causation_id, causation_id_type),
+        correlation_id: encode_id(correlation_id, correlation_id_type)
     }
   end
+
+  defp encode_id(nil, _type), do: nil
+  defp encode_id(value, "uuid"), do: UUID.string_to_binary!(value)
+  defp encode_id(value, "text"), do: value
 
   defp encode_uuid(nil), do: nil
   defp encode_uuid(value), do: UUID.string_to_binary!(value)

@@ -67,6 +67,48 @@ defmodule EventStore.Config do
     end
   end
 
+  @doc """
+  Get the column type used to store the correlation identifier.
+
+  Supported types are:
+
+    - "uuid" - Enforces UUID format. The identifier must be a valid UUID.
+    - "text" - Allows any string value as an identifier.
+  """
+  def correlation_id_type(event_store, config) do
+    case Keyword.get(config, :correlation_id_type, "uuid") do
+      valid when valid in ["uuid", "text"] ->
+        valid
+
+      invalid ->
+        raise ArgumentError,
+              inspect(event_store) <>
+                " `:correlation_id_type` expects either \"uuid\" or \"text\" but got: " <>
+                inspect(invalid)
+    end
+  end
+
+  @doc """
+  Get the column type used to store the causation identifier.
+
+  Supported types are:
+
+    - "uuid" - Enforces UUID format. The identifier must be a valid UUID.
+    - "text" - Allows any string value as an identifier.
+  """
+  def causation_id_type(event_store, config) do
+    case Keyword.get(config, :causation_id_type, "uuid") do
+      valid when valid in ["uuid", "text"] ->
+        valid
+
+      invalid ->
+        raise ArgumentError,
+              inspect(event_store) <>
+                " `:causation_id_type` expects either \"uuid\" or \"text\" but got: " <>
+                inspect(invalid)
+    end
+  end
+
   @postgrex_connection_opts [
     :after_connect,
     :after_connect_timeout,

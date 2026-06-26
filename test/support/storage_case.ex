@@ -7,6 +7,8 @@ defmodule EventStore.StorageCase do
     config = Config.parsed(TestEventStore, :eventstore)
     serializer = Serializer.serializer(TestEventStore, config)
     postgrex_config = Config.default_postgrex_opts(config)
+    correlation_id_type = Keyword.get(config, :correlation_id_type, "uuid")
+    causation_id_type = Keyword.get(config, :causation_id_type, "uuid")
 
     if Mix.env() == :migration do
       restore_migration_database_dump(config)
@@ -22,7 +24,9 @@ defmodule EventStore.StorageCase do
       schema: "public",
       event_store: TestEventStore,
       postgrex_config: postgrex_config,
-      serializer: serializer
+      serializer: serializer,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type
     ]
   end
 

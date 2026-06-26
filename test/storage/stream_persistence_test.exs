@@ -142,14 +142,19 @@ defmodule EventStore.Storage.StreamPersistenceTest do
          number_of_events,
          initial_event_number \\ 1
        ) do
-    %{conn: conn, schema: schema} = context
+    %{conn: conn, schema: schema, correlation_id_type: cit, causation_id_type: cait} = context
 
     {:ok, stream_id} = CreateStream.execute(conn, stream_uuid, schema: schema)
 
     recorded_events =
       EventFactory.create_recorded_events(number_of_events, stream_uuid, initial_event_number)
 
-    :ok = Appender.append(conn, stream_id, recorded_events, schema: schema)
+    :ok =
+      Appender.append(conn, stream_id, recorded_events,
+        schema: schema,
+        correlation_id_type: cit,
+        causation_id_type: cait
+      )
 
     {:ok, stream_id}
   end

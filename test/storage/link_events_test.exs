@@ -108,9 +108,13 @@ defmodule EventStore.Storage.LinkEventsTest do
   end
 
   defp append(context, stream_id, recorded_events) do
-    %{conn: conn, schema: schema} = context
+    %{conn: conn, schema: schema, correlation_id_type: cit, causation_id_type: cait} = context
 
-    Appender.append(conn, stream_id, recorded_events, schema: schema)
+    Appender.append(conn, stream_id, recorded_events,
+      schema: schema,
+      correlation_id_type: cit,
+      causation_id_type: cait
+    )
   end
 
   defp link(context, stream_id, recorded_events) do

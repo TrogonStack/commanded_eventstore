@@ -82,6 +82,8 @@ defmodule EventStore.RuntimeConfigTest do
     Keyword.merge(
       [
         column_data_type: "bytea",
+        correlation_id_type: "uuid",
+        causation_id_type: "uuid",
         enable_hard_deletes: false,
         otp_app: :eventstore,
         pool: DBConnection.ConnectionPool,

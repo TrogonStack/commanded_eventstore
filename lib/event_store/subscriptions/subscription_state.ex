@@ -19,6 +19,8 @@ defmodule EventStore.Subscriptions.SubscriptionState do
     :partition_by,
     :query_timeout,
     :lock_ref,
+    correlation_id_type: "uuid",
+    causation_id_type: "uuid",
     last_received: 0,
     last_sent: 0,
     last_ack: 0,

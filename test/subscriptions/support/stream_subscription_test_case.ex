@@ -441,7 +441,9 @@ defmodule EventStore.Subscriptions.StreamSubscriptionTestCase do
         schema: schema,
         serializer: serializer,
         stream_uuid: stream_uuid,
-        subscriber: subscriber
+        subscriber: subscriber,
+        correlation_id_type: correlation_id_type,
+        causation_id_type: causation_id_type
       } = context
 
       opts =
@@ -450,6 +452,8 @@ defmodule EventStore.Subscriptions.StreamSubscriptionTestCase do
         |> Keyword.put(:event_store, @event_store)
         |> Keyword.put(:schema, schema)
         |> Keyword.put(:serializer, serializer)
+        |> Keyword.put(:correlation_id_type, correlation_id_type)
+        |> Keyword.put(:causation_id_type, causation_id_type)
         |> Keyword.put_new(:buffer_size, 3)
 
       stream_uuid

@@ -11,9 +11,12 @@ defmodule EventStore.Storage.Reader do
   Read events from a single stream forwards from the given starting version.
   """
   def read_forward(conn, stream_id, start_version, count, opts) do
+    {correlation_id_type, opts} = Keyword.pop(opts, :correlation_id_type, "uuid")
+    {causation_id_type, opts} = Keyword.pop(opts, :causation_id_type, "uuid")
+
     case Reader.Query.read_events_forward(conn, stream_id, start_version, count, opts) do
       {:ok, []} = reply -> reply
-      {:ok, rows} -> map_rows_to_event_data(rows)
+      {:ok, rows} -> map_rows_to_event_data(rows, correlation_id_type, causation_id_type)
       {:error, reason} -> failed_to_read(stream_id, reason)
     end
   end
@@ -22,15 +25,18 @@ defmodule EventStore.Storage.Reader do
   Read events from a single stream backwards from the given starting version.
   """
   def read_backward(conn, stream_id, start_version, count, opts) do
+    {correlation_id_type, opts} = Keyword.pop(opts, :correlation_id_type, "uuid")
+    {causation_id_type, opts} = Keyword.pop(opts, :causation_id_type, "uuid")
+
     case Reader.Query.read_events_backward(conn, stream_id, start_version, count, opts) do
       {:ok, []} = reply -> reply
-      {:ok, rows} -> map_rows_to_event_data(rows)
+      {:ok, rows} -> map_rows_to_event_data(rows, correlation_id_type, causation_id_type)
       {:error, reason} -> failed_to_read(stream_id, reason)
     end
   end
 
-  defp map_rows_to_event_data(rows) do
-    {:ok, Reader.EventAdapter.to_event_data(rows)}
+  defp map_rows_to_event_data(rows, correlation_id_type, causation_id_type) do
+    {:ok, Reader.EventAdapter.to_event_data(rows, correlation_id_type, causation_id_type)}
   end
 
   defp failed_to_read(stream_id, reason) do
@@ -45,28 +51,33 @@ defmodule EventStore.Storage.Reader do
     @doc """
     Map event data from the database to `RecordedEvent` struct
     """
-    def to_event_data(rows), do: Enum.map(rows, &to_event_data_from_row/1)
+    def to_event_data(rows, correlation_id_type, causation_id_type),
+      do: Enum.map(rows, &to_event_data_from_row(&1, correlation_id_type, causation_id_type))
 
-    def to_event_data_from_row([
-          event_number,
-          event_id,
-          stream_uuid,
-          stream_version,
-          event_type,
-          correlation_id,
-          causation_id,
-          data,
-          metadata,
-          created_at
-        ]) do
+    def to_event_data_from_row(
+          [
+            event_number,
+            event_id,
+            stream_uuid,
+            stream_version,
+            event_type,
+            correlation_id,
+            causation_id,
+            data,
+            metadata,
+            created_at
+          ],
+          correlation_id_type,
+          causation_id_type
+        ) do
       %RecordedEvent{
         event_number: event_number,
         event_id: from_uuid(event_id),
         stream_uuid: stream_uuid,
         stream_version: stream_version,
         event_type: event_type,
-        correlation_id: from_uuid(correlation_id),
-        causation_id: from_uuid(causation_id),
+        correlation_id: decode_id(correlation_id, correlation_id_type),
+        causation_id: decode_id(causation_id, causation_id_type),
         data: data,
         metadata: metadata,
         created_at: from_timestamp(created_at)
@@ -75,6 +86,10 @@ defmodule EventStore.Storage.Reader do
 
     defp from_uuid(nil), do: nil
     defp from_uuid(uuid), do: UUID.binary_to_string!(uuid)
+
+    defp decode_id(nil, _type), do: nil
+    defp decode_id(value, "uuid"), do: UUID.binary_to_string!(value)
+    defp decode_id(value, "text"), do: value
 
     defp from_timestamp(%DateTime{} = timestamp), do: timestamp
 

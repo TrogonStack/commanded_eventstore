@@ -81,6 +81,8 @@ EventStore is [available in Hex](https://hex.pm/packages/eventstore) and can be 
       - `:schema` - define the Postgres schema to use (default: `public` schema).
       - `:timeout` - set the default database query timeout in milliseconds (default: 15,000ms).
       - `:shared_connection_pool` - allows a database connection pool to be shared amongst multiple event store instances (default: `nil`).
+      - `:correlation_id_type` - database column type used for `correlation_id` (`"uuid"` by default, or `"text"`).
+      - `:causation_id_type` - database column type used for `causation_id` (`"uuid"` by default, or `"text"`).
 
       Subscription options:
 

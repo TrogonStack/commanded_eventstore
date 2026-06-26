@@ -5,13 +5,15 @@ defmodule EventStore.Sql.Init do
 
   def statements(config) do
     column_data_type = Keyword.fetch!(config, :column_data_type)
+    correlation_id_type = Keyword.fetch!(config, :correlation_id_type)
+    causation_id_type = Keyword.fetch!(config, :causation_id_type)
     schema = Keyword.fetch!(config, :schema)
 
     [
       ~s(SET LOCAL search_path TO "#{schema}";),
       create_streams_table(),
       create_stream_uuid_index(),
-      create_events_table(column_data_type),
+      create_events_table(column_data_type, correlation_id_type, causation_id_type),
       create_stream_events_table(),
       create_stream_events_index(),
       create_event_store_exception_function(),
@@ -58,14 +60,14 @@ defmodule EventStore.Sql.Init do
     """
   end
 
-  defp create_events_table(column_data_type) do
+  defp create_events_table(column_data_type, correlation_id_type, causation_id_type) do
     """
     CREATE TABLE events
     (
         event_id uuid PRIMARY KEY NOT NULL,
         event_type text NOT NULL,
-        causation_id uuid NULL,
-        correlation_id uuid NULL,
+        causation_id #{causation_id_type} NULL,
+        correlation_id #{correlation_id_type} NULL,
         data #{column_data_type} NOT NULL,
         metadata #{column_data_type} NULL,
         created_at timestamp with time zone DEFAULT NOW() NOT NULL
