@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "e3b37d6953aa31ea82254a162423fbdc506e9495",
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Features",
+      "hidden": false
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes",
+      "hidden": false
+    },
+    {
+      "type": "chore",
+      "section": "Miscellaneous",
+      "hidden": true
+    }
+  ],
+  "plugins": [
+    {
+      "type": "sentence-case"
+    }
+  ],
+  "signoff": "SHT Bot <61149376+sht-bot@users.noreply.github.com>",
+  "packages": {
+    ".": {
+      "release-type": "elixir",
+      "draft": false,
+      "draft-pull-request": false,
+      "prerelease": false,
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true
+    }
+  }
+}
