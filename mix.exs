@@ -1,7 +1,7 @@
 defmodule EventStore.Mixfile do
   use Mix.Project
 
-  @source_url "https://github.com/commanded/eventstore"
+  @source_url "https://github.com/TrogonStack/eventstore"
   @version "1.4.8"
 
   def project do

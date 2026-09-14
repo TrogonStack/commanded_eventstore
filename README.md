@@ -14,13 +14,13 @@ EventStore supports [running on a cluster of nodes](guides/Cluster.md).
 
 MIT License
 
-![Build Status](https://github.com/commanded/eventstore/workflows/Test/badge.svg?branch=master)
+![Build Status](https://github.com/TrogonStack/eventstore/workflows/Test/badge.svg?branch=main)
 
 ---
 
 ### Overview
 
-> This README and the following guides follow the `master` branch which may not be the currently published version.
+> This README and the following guides follow the `main` branch which may not be the currently published version.
 > [Read docs for the latest published version of EventStore on Hex](https://hexdocs.pm/eventstore/).
 
 - [Getting started](guides/Getting%20Started.md)
@@ -294,4 +294,4 @@ EventStore exists thanks to the following people who have contributed.
 
 ## Need help?
 
-Please [open an issue](https://github.com/commanded/eventstore/issues) if you encounter a problem, or need assistance. You can also seek help in the #commanded channel in the [official Elixir Slack](https://elixir-slackin.herokuapp.com/).
+Please [open an issue](https://github.com/TrogonStack/eventstore/issues) if you encounter a problem, or need assistance. You can also seek help in the #commanded channel in the [official Elixir Slack](https://elixir-slackin.herokuapp.com/).
