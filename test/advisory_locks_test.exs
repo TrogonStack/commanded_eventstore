@@ -1,6 +1,8 @@
 defmodule EventStore.AdvisoryLocksTest do
   use EventStore.StorageCase
 
+  import ExUnit.CaptureLog
+
   alias EventStore.{AdvisoryLocks, Config, Wait}
   alias EventStore.Storage
 
@@ -79,6 +81,71 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "graceful shutdown" do
+    test "should complete an in-flight lock query before terminating" do
+      reply_to = self()
+
+      holder = hold_only_connection()
+
+      log =
+        capture_log(fn ->
+          spawn(fn ->
+            send(reply_to, {:lock, AdvisoryLocks.try_advisory_lock(@locks, 1, 15_000)})
+          end)
+
+          wait_until_waiting_for_connection()
+
+          Process.send_after(holder, :release, 200)
+
+          stop_supervised!(TestEventStore)
+
+          assert_receive {:lock, {:ok, lock}}, 15_000
+          assert is_reference(lock)
+        end)
+
+      refute log =~ "DBConnection.ConnectionError"
+    end
+
+    @tag capture_log: true
+    test "should stop with the reason reported by a linked process" do
+      locks = Process.whereis(@locks)
+      ref = Process.monitor(locks)
+
+      spawn(fn ->
+        Process.link(locks)
+        exit(:boom)
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, ^locks, :boom}, 5_000
+    end
+
+    test "should keep running when a linked process exits normally" do
+      locks = Process.whereis(@locks)
+      reply_to = self()
+
+      pid =
+        spawn(fn ->
+          Process.link(locks)
+
+          send(reply_to, :linked)
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive :linked, 5_000
+
+      ref = Process.monitor(locks)
+
+      send(pid, :stop)
+
+      refute_receive {:DOWN, ^ref, :process, ^locks, _reason}, 1_000
+
+      assert {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+    end
+  end
+
   describe "acquire same lock on different schemas" do
     setup do
       postgrex_config = Config.parsed(TestEventStore, :eventstore)
@@ -104,6 +171,39 @@ defmodule EventStore.AdvisoryLocksTest do
       :ok = Storage.Lock.try_acquire_exclusive_lock(conn1, 1, schema: schema1)
       :ok = Storage.Lock.try_acquire_exclusive_lock(conn2, 1, schema: schema2)
     end
+  end
+
+  defp hold_only_connection do
+    %{pid: conn} = Process.whereis(@conn) |> :sys.get_state()
+
+    reply_to = self()
+
+    holder =
+      spawn(fn ->
+        Postgrex.transaction(
+          conn,
+          fn _ ->
+            send(reply_to, :connection_held)
+
+            receive do
+              :release -> :ok
+            end
+          end,
+          timeout: 30_000
+        )
+      end)
+
+    assert_receive :connection_held, 5_000
+
+    holder
+  end
+
+  defp wait_until_waiting_for_connection do
+    locks = Process.whereis(@locks)
+
+    Wait.until(fn ->
+      assert {:timeout, _} = catch_exit(:sys.get_state(locks, 10))
+    end)
   end
 
   defp shutdown_database_connection do
