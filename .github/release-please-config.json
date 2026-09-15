@@ -13,9 +13,29 @@
       "hidden": false
     },
     {
+      "type": "perf",
+      "section": "Performance",
+      "hidden": false
+    },
+    {
+      "type": "refactor",
+      "section": "Refactors",
+      "hidden": false
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": false
+    },
+    {
+      "type": "docs",
+      "section": "Documentation",
+      "hidden": false
+    },
+    {
       "type": "chore",
       "section": "Miscellaneous",
-      "hidden": true
+      "hidden": false
     }
   ],
   "plugins": [
