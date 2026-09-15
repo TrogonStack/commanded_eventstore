@@ -189,12 +189,12 @@ defmodule EventStore.Storage.AppendEventsTest do
     events = EventFactory.create_recorded_events(3, stream_uuid)
     :ok = Appender.append(conn, stream_id, events, append_opts(context))
 
-    for event <- events do
-      events = [%RecordedEvent{event | stream_version: 4}]
+    Enum.each(events, fn %RecordedEvent{} = event ->
+      duplicate_events = [%RecordedEvent{event | stream_version: 4}]
 
       assert {:error, :duplicate_event} =
-               Appender.append(conn, stream_id, events, append_opts(context))
-    end
+               Appender.append(conn, stream_id, duplicate_events, append_opts(context))
+    end)
   end
 
   test "append existing events to a different stream should fail", context do
@@ -205,14 +205,14 @@ defmodule EventStore.Storage.AppendEventsTest do
     events = EventFactory.create_recorded_events(3, stream1_uuid)
     :ok = Appender.append(conn, stream1_id, events, append_opts(context))
 
-    for event <- events do
-      events = [
+    Enum.each(events, fn %RecordedEvent{} = event ->
+      duplicate_events = [
         %RecordedEvent{event | stream_uuid: stream2_uuid, stream_version: 1}
       ]
 
       assert {:error, :duplicate_event} =
-               Appender.append(conn, stream2_id, events, append_opts(context))
-    end
+               Appender.append(conn, stream2_id, duplicate_events, append_opts(context))
+    end)
   end
 
   test "append event to schema which does not exist", %{conn: conn} do

@@ -1,28 +1,19 @@
-#
-# Seed EventStore with data to test migrations.
-#
-#   MIX_ENV=test mix es.reset
-#   MIX_ENV=test mix run test/manual/seed_eventstore.exs
-#
-#   pg_dump eventstore_test > test/fixture/eventstore_seed.sql
-#   pg_dump -Fc eventstore_test > test/fixture/eventstore_seed.dump
-#
+defmodule EventStore.MigrationSeed do
+  @moduledoc """
+  Seeds an event store with the data captured in `test/fixture/eventstore_seed.dump`.
 
-defmodule Event do
-  @derive Jason.Encoder
-  defstruct [:data, version: "1"]
-end
+      MIX_ENV=test mix es.reset
+      MIX_ENV=test mix run -e "EventStore.MigrationSeed.seed()"
 
-defmodule Snapshot do
-  @derive Jason.Encoder
-  defstruct [:data, version: "1"]
-end
+      pg_dump -Fc eventstore_test > test/fixture/eventstore_seed.dump
+  """
 
-defmodule Seed do
   alias EventStore.{EventData, UUID}
   alias EventStore.Snapshots.SnapshotData
 
-  def run(opts \\ []) do
+  def seed(opts \\ []) do
+    {:ok, _pid} = TestEventStore.start_link()
+
     append_events(opts)
     link_events(opts)
     record_snapshots(opts)
@@ -96,8 +87,3 @@ defmodule Seed do
       )
   end
 end
-
-{:ok, _pid} = TestEventStore.start_link()
-
-# Seed.run(stream_count: 1_000, event_count: 100, snapshot_count: 1_000)
-Seed.run()
