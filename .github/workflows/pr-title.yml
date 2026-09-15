@@ -1,0 +1,25 @@
+name: PR title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:
+    name: Conventional commit type
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check the title
+      env:
+        TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        if ! printf '%s' "$TITLE" | grep -qE '^(chore|feat|fix)(\([a-z0-9._-]+\))?!?: .+'; then
+          echo "::error::\"$TITLE\" must start with chore:, feat: or fix:, optionally scoped. Squash merging takes the pull request title as the commit subject, and release-please only recognises those three types."
+          exit 1
+        fi
