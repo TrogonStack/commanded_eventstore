@@ -5,12 +5,12 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   alias EventStore.Streams.Stream
   alias EventStore.Subscriptions.{SubscriptionState, Subscriber}
 
-  use EventStore.Fsm, initial_state: :initial, initial_data: %SubscriptionState{}
-
   require Logger
 
+  defstruct state: :initial, data: %SubscriptionState{}
+
   def new(stream_uuid, subscription_name, opts) do
-    new(
+    %__MODULE__{
       data: %SubscriptionState{
         conn: Keyword.fetch!(opts, :conn),
         event_store: Keyword.fetch!(opts, :event_store),
@@ -31,7 +31,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         max_size: opts[:max_size] || 1_000,
         transient: Keyword.get(opts, :transient, false)
       }
-    )
+    }
   end
 
   # The main flow between states in this finite state machine is:
@@ -39,217 +39,227 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   #   initial -> request_catch_up -> catching_up -> subscribed
   #
 
-  defstate initial do
-    defevent subscribe, data: %SubscriptionState{transient: true} = data do
-      data = SubscriptionState.reset_event_tracking(data)
+  def subscribe(
+        %__MODULE__{
+          state: :initial,
+          data: %SubscriptionState{transient: true} = data
+        } = fsm
+      ) do
+    data = SubscriptionState.reset_event_tracking(data)
 
-      with :ok <- subscribe_to_events(data) do
-        last_seen = data.start_from
+    with :ok <- subscribe_to_events(data) do
+      last_seen = data.start_from
 
-        data = %SubscriptionState{
+      data = %SubscriptionState{
+        data
+        | last_received: last_seen,
+          last_sent: last_seen,
+          last_ack: last_seen
+      }
+
+      notify_subscribed(data)
+
+      %__MODULE__{fsm | state: :request_catch_up, data: data}
+    else
+      _ ->
+        # Failed to subscribe to stream, retry after delay
+        %__MODULE__{fsm | state: :initial, data: data}
+    end
+  end
+
+  def subscribe(%__MODULE__{state: :initial, data: %SubscriptionState{} = data} = fsm) do
+    data = SubscriptionState.reset_event_tracking(data)
+
+    with {:ok, subscription} <- create_subscription(data),
+         {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription),
+         :ok <- subscribe_to_events(data) do
+      %Storage.Subscription{subscription_id: subscription_id, last_seen: last_seen} =
+        subscription
+
+      last_seen = last_seen || 0
+
+      data = %SubscriptionState{
+        data
+        | subscription_id: subscription_id,
+          lock_ref: lock_ref,
+          last_received: last_seen,
+          last_sent: last_seen,
+          last_ack: last_seen
+      }
+
+      notify_subscribed(data)
+
+      %__MODULE__{fsm | state: :request_catch_up, data: data}
+    else
+      _ ->
+        # Failed to subscribe to stream, retry after delay
+        %__MODULE__{fsm | state: :initial, data: data}
+    end
+  end
+
+  # Attempt to subscribe
+  def subscribe(%__MODULE__{state: :disconnected, data: %SubscriptionState{} = data} = fsm) do
+    with {:ok, subscription} <- create_subscription(data),
+         {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription) do
+      %Storage.Subscription{
+        subscription_id: subscription_id,
+        last_seen: last_seen
+      } = subscription
+
+      last_ack = last_seen || 0
+
+      data = %SubscriptionState{
+        data
+        | subscription_id: subscription_id,
+          lock_ref: lock_ref,
+          last_sent: last_ack,
+          last_ack: last_ack
+      }
+
+      %__MODULE__{fsm | state: :request_catch_up, data: data}
+    else
+      _ ->
+        %__MODULE__{fsm | state: :disconnected, data: data}
+    end
+  end
+
+  def subscribe(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
+
+  def catch_up(%__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm) do
+    catch_up_from_stream(fsm, data)
+  end
+
+  def catch_up(%__MODULE__{state: :subscribed, data: %SubscriptionState{} = data} = fsm) do
+    %__MODULE__{fsm | state: :request_catch_up, data: data}
+  end
+
+  def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
+
+  def ack(
+        %__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm,
+        ack,
+        subscriber
+      ) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      catch_up_from_stream(fsm, data)
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  def ack(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm,
+        ack,
+        subscriber
+      ) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      catch_up_from_stream(fsm, data)
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  def ack(
+        %__MODULE__{state: :subscribed, data: %SubscriptionState{} = data} = fsm,
+        ack,
+        subscriber
+      ) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      %__MODULE__{fsm | state: :subscribed, data: data}
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  def ack(
+        %__MODULE__{state: :max_capacity, data: %SubscriptionState{} = data} = fsm,
+        ack,
+        subscriber
+      ) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      if empty_queue?(data) do
+        # No further pending events so catch up with any unseen.
+        %__MODULE__{fsm | state: :request_catch_up, data: data}
+      else
+        # Pending events remain, wait until subscriber ack's.
+        %__MODULE__{fsm | state: :max_capacity, data: data}
+      end
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  def ack(%__MODULE__{data: %SubscriptionState{}} = fsm, _ack, _subscriber), do: fsm
+
+  def checkpoint(%__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm) do
+    %__MODULE__{fsm | state: :request_catch_up, data: persist_checkpoint(data)}
+  end
+
+  def checkpoint(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
+    %__MODULE__{fsm | state: :catching_up, data: persist_checkpoint(data)}
+  end
+
+  def checkpoint(%__MODULE__{state: :subscribed, data: %SubscriptionState{} = data} = fsm) do
+    %__MODULE__{fsm | state: :subscribed, data: persist_checkpoint(data)}
+  end
+
+  def checkpoint(%__MODULE__{state: :max_capacity, data: %SubscriptionState{} = data} = fsm) do
+    %__MODULE__{fsm | state: :max_capacity, data: persist_checkpoint(data)}
+  end
+
+  def checkpoint(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
+
+  # Notify events when subscribed
+  def notify_events(
+        %__MODULE__{state: :subscribed, data: %SubscriptionState{} = data} = fsm,
+        events
+      ) do
+    %SubscriptionState{last_received: last_received} = data
+
+    expected_event = last_received + 1
+
+    case first_event_number(events) do
+      past when past < expected_event ->
+        Logger.debug(describe(data) <> " received past event(s), ignoring")
+
+        # Ignore already seen events
+        %__MODULE__{fsm | state: :subscribed, data: data}
+
+      future when future > expected_event ->
+        Logger.debug(describe(data) <> " received unexpected event(s), requesting catch up")
+
+        # Missed event(s), request catch-up with any unseen events from storage
+        %__MODULE__{fsm | state: :request_catch_up, data: data}
+
+      ^expected_event ->
+        Logger.debug(describe(data) <> " is enqueueing #{length(events)} event(s)")
+
+        # Subscriber is up-to-date, so enqueue events to send
+        data =
           data
-          | last_received: last_seen,
-            last_sent: last_seen,
-            last_ack: last_seen
-        }
+          |> enqueue_events(events)
+          |> notify_subscribers()
 
-        notify_subscribed(data)
-
-        next_state(:request_catch_up, data)
-      else
-        _ ->
-          # Failed to subscribe to stream, retry after delay
-          next_state(:initial, data)
-      end
-    end
-
-    defevent subscribe,
-      data: %SubscriptionState{} = data do
-      data = SubscriptionState.reset_event_tracking(data)
-
-      with {:ok, subscription} <- create_subscription(data),
-           {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription),
-           :ok <- subscribe_to_events(data) do
-        %Storage.Subscription{subscription_id: subscription_id, last_seen: last_seen} =
-          subscription
-
-        last_seen = last_seen || 0
-
-        data = %SubscriptionState{
-          data
-          | subscription_id: subscription_id,
-            lock_ref: lock_ref,
-            last_received: last_seen,
-            last_sent: last_seen,
-            last_ack: last_seen
-        }
-
-        notify_subscribed(data)
-
-        next_state(:request_catch_up, data)
-      else
-        _ ->
-          # Failed to subscribe to stream, retry after delay
-          next_state(:initial, data)
-      end
-    end
-  end
-
-  defstate request_catch_up do
-    defevent catch_up, data: %SubscriptionState{} = data do
-      catch_up_from_stream(data)
-    end
-
-    defevent ack(ack, subscriber), data: %SubscriptionState{} = data do
-      with {:ok, data} <- ack_events(data, ack, subscriber) do
-        catch_up_from_stream(data)
-      else
-        reply -> respond(reply)
-      end
-    end
-
-    defevent checkpoint(), data: %SubscriptionState{} = data do
-      next_state(:request_catch_up, persist_checkpoint(data))
-    end
-  end
-
-  defstate catching_up do
-    defevent ack(ack, subscriber), data: %SubscriptionState{} = data do
-      with {:ok, data} <- ack_events(data, ack, subscriber) do
-        catch_up_from_stream(data)
-      else
-        reply -> respond(reply)
-      end
-    end
-
-    defevent checkpoint(), data: %SubscriptionState{} = data do
-      next_state(:catching_up, persist_checkpoint(data))
-    end
-  end
-
-  defstate subscribed do
-    # Notify events when subscribed
-    defevent notify_events(events), data: %SubscriptionState{} = data do
-      %SubscriptionState{last_received: last_received} = data
-
-      expected_event = last_received + 1
-
-      case first_event_number(events) do
-        past when past < expected_event ->
-          Logger.debug(describe(data) <> " received past event(s), ignoring")
-
-          # Ignore already seen events
-          next_state(:subscribed, data)
-
-        future when future > expected_event ->
-          Logger.debug(describe(data) <> " received unexpected event(s), requesting catch up")
-
-          # Missed event(s), request catch-up with any unseen events from storage
-          next_state(:request_catch_up, data)
-
-        ^expected_event ->
-          Logger.debug(describe(data) <> " is enqueueing #{length(events)} event(s)")
-
-          # Subscriber is up-to-date, so enqueue events to send
-          data =
-            data
-            |> enqueue_events(events)
-            |> notify_subscribers()
-
-          if over_capacity?(data) do
-            # Too many pending events, must wait for these to be processed.
-            next_state(:max_capacity, data)
-          else
-            # Remain subscribed, waiting for subscriber to ack already sent events.
-            next_state(:subscribed, data)
-          end
-      end
-    end
-
-    defevent ack(ack, subscriber), data: %SubscriptionState{} = data do
-      with {:ok, data} <- ack_events(data, ack, subscriber) do
-        next_state(:subscribed, data)
-      else
-        reply -> respond(reply)
-      end
-    end
-
-    defevent catch_up, data: %SubscriptionState{} = data do
-      next_state(:request_catch_up, data)
-    end
-
-    defevent checkpoint(), data: %SubscriptionState{} = data do
-      next_state(:subscribed, persist_checkpoint(data))
-    end
-  end
-
-  defstate max_capacity do
-    defevent ack(ack, subscriber), data: %SubscriptionState{} = data do
-      with {:ok, data} <- ack_events(data, ack, subscriber) do
-        if empty_queue?(data) do
-          # No further pending events so catch up with any unseen.
-          next_state(:request_catch_up, data)
+        if over_capacity?(data) do
+          # Too many pending events, must wait for these to be processed.
+          %__MODULE__{fsm | state: :max_capacity, data: data}
         else
-          # Pending events remain, wait until subscriber ack's.
-          next_state(:max_capacity, data)
+          # Remain subscribed, waiting for subscriber to ack already sent events.
+          %__MODULE__{fsm | state: :subscribed, data: data}
         end
-      else
-        reply -> respond(reply)
-      end
-    end
-
-    defevent checkpoint(), data: %SubscriptionState{} = data do
-      next_state(:max_capacity, persist_checkpoint(data))
     end
   end
 
-  defstate disconnected do
-    # Attempt to subscribe
-    defevent subscribe, data: %SubscriptionState{} = data do
-      with {:ok, subscription} <- create_subscription(data),
-           {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription) do
-        %Storage.Subscription{
-          subscription_id: subscription_id,
-          last_seen: last_seen
-        } = subscription
-
-        last_ack = last_seen || 0
-
-        data = %SubscriptionState{
-          data
-          | subscription_id: subscription_id,
-            lock_ref: lock_ref,
-            last_sent: last_ack,
-            last_ack: last_ack
-        }
-
-        next_state(:request_catch_up, data)
-      else
-        _ ->
-          next_state(:disconnected, data)
-      end
-    end
+  # Ignore notify events unless subscribed
+  def notify_events(%__MODULE__{data: %SubscriptionState{} = data} = fsm, events) do
+    %__MODULE__{fsm | data: track_last_received(data, events)}
   end
 
-  defstate unsubscribed do
-    defevent unsubscribe(_subscriber), data: %SubscriptionState{} = data do
-      next_state(:unsubscribed, data)
-    end
-  end
-
-  # Catch-all event handlers
-
-  defevent ack(_ack, _subscriber), data: %SubscriptionState{} = data, state: state do
-    next_state(state, data)
-  end
-
-  defevent checkpoint(), data: %SubscriptionState{} = data, state: state do
-    next_state(state, data)
-  end
-
-  defevent connect_subscriber(subscriber, opts),
-    data: %SubscriptionState{} = data,
-    state: state do
+  def connect_subscriber(
+        %__MODULE__{state: state, data: %SubscriptionState{} = data} = fsm,
+        subscriber,
+        opts
+      ) do
     data =
       data
       |> monitor_subscriber(subscriber, opts)
@@ -259,32 +269,29 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       notify_subscribed(subscriber)
     end
 
-    next_state(state, data)
+    %__MODULE__{fsm | data: data}
   end
 
-  defevent subscribe, data: %SubscriptionState{} = data, state: state do
-    next_state(state, data)
-  end
-
-  # Ignore notify events unless subscribed
-  defevent notify_events(events), data: %SubscriptionState{} = data, state: state do
-    next_state(state, track_last_received(data, events))
-  end
-
-  defevent catch_up, data: %SubscriptionState{} = data, state: state do
-    next_state(state, data)
-  end
-
-  defevent disconnect(lock_ref), data: %SubscriptionState{lock_ref: lock_ref} = data do
+  def disconnect(
+        %__MODULE__{data: %SubscriptionState{lock_ref: lock_ref} = data} = fsm,
+        lock_ref
+      ) do
     data =
       %SubscriptionState{data | lock_ref: nil}
       |> SubscriptionState.reset_event_tracking()
       |> purge_in_flight_events()
 
-    next_state(:disconnected, data)
+    %__MODULE__{fsm | state: :disconnected, data: data}
   end
 
-  defevent unsubscribe(pid), data: %SubscriptionState{} = data, state: state do
+  def unsubscribe(
+        %__MODULE__{state: :unsubscribed, data: %SubscriptionState{}} = fsm,
+        _subscriber
+      ) do
+    fsm
+  end
+
+  def unsubscribe(%__MODULE__{data: %SubscriptionState{} = data} = fsm, pid) do
     data =
       data
       |> remove_subscriber(pid)
@@ -292,17 +299,11 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
     case has_subscribers?(data) do
       true ->
-        next_state(state, data)
+        %__MODULE__{fsm | data: data}
 
       false ->
-        data = persist_checkpoint(data)
-
-        next_state(:unsubscribed, data)
+        %__MODULE__{fsm | state: :unsubscribed, data: persist_checkpoint(data)}
     end
-  end
-
-  defevent terminate, data: %SubscriptionState{} = data, state: state do
-    next_state(state, data)
   end
 
   defp create_subscription(%SubscriptionState{} = data) do
@@ -414,17 +415,20 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp last_event_number([%RecordedEvent{event_number: event_number}]), do: event_number
   defp last_event_number([_event | events]), do: last_event_number(events)
 
-  def catch_up_from_stream(%SubscriptionState{queue_size: 0} = data) do
+  defp catch_up_from_stream(
+         %__MODULE__{} = fsm,
+         %SubscriptionState{queue_size: 0} = data
+       ) do
     %SubscriptionState{last_sent: last_sent, last_received: last_received} = data
 
     case read_stream_forward(data) do
       {:ok, []} ->
         if last_sent == last_received do
           # Subscriber is up-to-date with latest published events
-          next_state(:subscribed, data)
+          %__MODULE__{fsm | state: :subscribed, data: data}
         else
           # Need to catch-up with events published while catching up
-          next_state(:request_catch_up, data)
+          %__MODULE__{fsm | state: :request_catch_up, data: data}
         end
 
       {:ok, events} ->
@@ -432,24 +436,24 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
         if empty_queue?(data) do
           # Request next batch of events
-          next_state(:request_catch_up, data)
+          %__MODULE__{fsm | state: :request_catch_up, data: data}
         else
           # Wait until subscribers have ack'd in-flight events
-          next_state(:catching_up, data)
+          %__MODULE__{fsm | state: :catching_up, data: data}
         end
 
       {:error, :stream_deleted} ->
         # Don't allow subscriptions to deleted streams to receive any events
-        next_state(:unsubscribed, data)
+        %__MODULE__{fsm | state: :unsubscribed, data: data}
 
       {:error, :stream_not_found} ->
         # Allow subscriptions to streams which don't yet exist, but might be created later
-        next_state(:subscribed, data)
+        %__MODULE__{fsm | state: :subscribed, data: data}
     end
   end
 
-  def catch_up_from_stream(%SubscriptionState{} = data) do
-    next_state(:catching_up, data)
+  defp catch_up_from_stream(%__MODULE__{} = fsm, %SubscriptionState{} = data) do
+    %__MODULE__{fsm | state: :catching_up, data: data}
   end
 
   defp read_stream_forward(%SubscriptionState{} = data) do
