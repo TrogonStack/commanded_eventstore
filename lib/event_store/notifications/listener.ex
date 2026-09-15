@@ -13,7 +13,15 @@ defmodule EventStore.Notifications.Listener do
 
   alias EventStore.Notifications.{Listener, Notification}
 
-  defstruct [:listen_to, :query_timeout, :schema, :ref, demand: 0, queue: :queue.new()]
+  defstruct [
+    :listen_to,
+    :monitor_ref,
+    :query_timeout,
+    :schema,
+    :ref,
+    demand: 0,
+    queue: :queue.new()
+  ]
 
   def start_link(opts) do
     {start_opts, listener_opts} =
@@ -44,12 +52,12 @@ defmodule EventStore.Notifications.Listener do
     dispatch_events([], state)
   end
 
-  def handle_info({:DOWN, _ref, :process, listen_to, reason}, %{listen_to: listen_to} = state) do
+  def handle_info({:DOWN, ref, :process, _object, reason}, %Listener{monitor_ref: ref} = state) do
     {:stop, reason, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
-    {:noreply, state}
+  def handle_info({:DOWN, _ref, :process, _object, _reason}, %Listener{} = state) do
+    {:noreply, [], state}
   end
 
   def handle_demand(incoming_demand, %Listener{} = state) do
@@ -71,9 +79,9 @@ defmodule EventStore.Notifications.Listener do
         {:eventually, ref} -> ref
       end
 
-    Process.monitor(listen_to)
+    monitor_ref = Process.monitor(listen_to)
 
-    %Listener{state | ref: ref}
+    %Listener{state | ref: ref, monitor_ref: monitor_ref}
   end
 
   defp dispatch_events(events, %Listener{demand: 0} = state) do
