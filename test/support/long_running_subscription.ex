@@ -8,6 +8,7 @@ defmodule EventStore.LongRunningSubscription do
   alias EventStore.UUID
 
   defmodule ExampleEvent do
+    @derive Jason.Encoder
     defstruct [:event]
   end
 
