@@ -47,8 +47,13 @@ defmodule EventStore.Notifications.NotificationsSupervisorTest do
     end
   end
 
+  # OTP 28 reports the `gen_server` hibernation loop where earlier releases
+  # reported `:erlang.hibernate/3`.
+  @hibernated_functions [{:erlang, :hibernate, 3}, {:gen_server, :loop_hibernate, 4}]
+
   defp assert_hibernated(pid) do
-    assert Process.info(pid, :current_function) == {:current_function, {:erlang, :hibernate, 3}}
+    assert {:current_function, current_function} = Process.info(pid, :current_function)
+    assert current_function in @hibernated_functions
   end
 
   defp append_events(stream_uuid, count, expected_version \\ 0) do
