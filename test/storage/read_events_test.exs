@@ -36,7 +36,7 @@ defmodule EventStore.Storage.ReadEventsTest do
     test "without correlation_id", context do
       {:ok, stream_uuid, stream_id} = create_stream(context)
 
-      [recorded_event] = EventFactory.create_recorded_events(1, stream_uuid)
+      [%RecordedEvent{} = recorded_event] = EventFactory.create_recorded_events(1, stream_uuid)
 
       recorded_event = %RecordedEvent{recorded_event | correlation_id: nil}
 
@@ -49,7 +49,7 @@ defmodule EventStore.Storage.ReadEventsTest do
     test "without causation_id", context do
       {:ok, stream_uuid, stream_id} = create_stream(context)
 
-      [recorded_event] = EventFactory.create_recorded_events(1, stream_uuid)
+      [%RecordedEvent{} = recorded_event] = EventFactory.create_recorded_events(1, stream_uuid)
 
       recorded_event = %RecordedEvent{recorded_event | causation_id: nil}
 

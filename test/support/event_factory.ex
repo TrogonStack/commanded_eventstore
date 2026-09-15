@@ -60,7 +60,7 @@ defmodule EventStore.EventFactory do
 
   def deserialize_events(events) do
     events
-    |> Enum.map(fn event ->
+    |> Enum.map(fn %RecordedEvent{} = event ->
       %RecordedEvent{
         event
         | data: deserialize(event.data, type: "Elixir.EventStore.EventFactory.Event"),
