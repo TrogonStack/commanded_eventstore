@@ -1,0 +1,24 @@
+name: PR title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:
+    name: Conventional commit type
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
+
+    - name: Check the title
+      env:
+        TITLE: ${{ github.event.pull_request.title }}
+      run: printf '%s\n' "$TITLE" | .github/conventional-subject.sh
