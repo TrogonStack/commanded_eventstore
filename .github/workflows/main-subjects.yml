@@ -1,0 +1,31 @@
+name: Main subjects
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:
+    name: Landed commit types
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
+      with:
+        fetch-depth: 0
+
+    - name: Check the landed subjects
+      env:
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+      run: |
+        if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+          revisions=("$BEFORE..$AFTER")
+        else
+          revisions=(--max-count=1 "$AFTER")
+        fi
+
+        git log --no-merges --format=%s "${revisions[@]}" | .github/conventional-subject.sh

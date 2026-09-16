@@ -16,11 +16,9 @@ jobs:
     name: Conventional commit type
     runs-on: ubuntu-latest
     steps:
+    - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3.7.0
+
     - name: Check the title
       env:
         TITLE: ${{ github.event.pull_request.title }}
-      run: |
-        if ! printf '%s' "$TITLE" | grep -qE '^(chore|feat|fix)(\([a-z0-9._-]+\))?!?: .+'; then
-          echo "::error::\"$TITLE\" must start with chore:, feat: or fix:, optionally scoped. Squash merging takes the pull request title as the commit subject, and release-please only recognises those three types."
-          exit 1
-        fi
+      run: printf '%s\n' "$TITLE" | .github/conventional-subject.sh
