@@ -797,8 +797,79 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
 
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
+
       assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
       refute Process.alive?(subscription)
+
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should not be deleted while a subscriber is connected", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+
+      assert {:error, :subscription_has_subscribers} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      assert Process.alive?(subscription)
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should not be deleted while another of its concurrent subscribers is connected", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+      test = self()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          concurrency_limit: 2
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      sibling =
+        spawn_link(fn ->
+          {:ok, ^subscription} =
+            EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+              concurrency_limit: 2
+            )
+
+          send(test, :sibling_subscribed)
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive :sibling_subscribed
+
+      :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
+
+      assert {:error, :subscription_has_subscribers} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      assert Process.alive?(subscription)
+
+      send(sibling, :stop)
+    end
+
+    test "should be deleted when it has no subscribers", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
 
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end

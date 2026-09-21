@@ -45,9 +45,16 @@ defmodule EventStore.Subscriptions.Supervisor do
         :ok
 
       subscription ->
-        supervisor = Module.concat(event_store, __MODULE__)
+        # Terminating through the supervisor rather than asking the subscription to stop itself,
+        # so that the checkpoint written while it terminates cannot race the caller deleting the
+        # subscription it belongs to.
+        if Subscription.has_subscribers?(subscription) do
+          {:error, :subscription_has_subscribers}
+        else
+          supervisor = Module.concat(event_store, __MODULE__)
 
-        DynamicSupervisor.terminate_child(supervisor, subscription)
+          DynamicSupervisor.terminate_child(supervisor, subscription)
+        end
     end
   end
 

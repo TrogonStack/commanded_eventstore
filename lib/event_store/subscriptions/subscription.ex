@@ -84,6 +84,13 @@ defmodule EventStore.Subscriptions.Subscription do
     GenServer.call(subscription, {:unsubscribe, self()})
   end
 
+  @doc """
+  Whether any subscriber is still connected to the subscription.
+  """
+  def has_subscribers?(subscription) do
+    GenServer.call(subscription, :has_subscribers?)
+  end
+
   @doc false
   def last_seen(subscription) do
     GenServer.call(subscription, :last_seen)
@@ -242,6 +249,15 @@ defmodule EventStore.Subscriptions.Subscription do
     else
       {:reply, :ok, state}
     end
+  end
+
+  @impl GenServer
+  def handle_call(:has_subscribers?, _from, %Subscription{} = state) do
+    %Subscription{
+      subscription: %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}}
+    } = state
+
+    {:reply, subscribers != %{}, state}
   end
 
   @impl GenServer

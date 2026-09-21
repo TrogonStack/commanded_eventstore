@@ -290,6 +290,8 @@ defmodule EventStore.TelemetryTest do
 
     assert_receive {:subscribed, ^subscription}
 
+    :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
+
     attach_telemetry(:delete_subscription)
 
     assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
