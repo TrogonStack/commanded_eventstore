@@ -24,6 +24,18 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     {:ok, %{subscription_name: subscription_name}}
   end
 
+  # A subscription that has begun terminating answers no calls: it dies with the call still in its
+  # mailbox, which `GenServer.call` reports to its caller as an exit.
+  defmodule TerminatingSubscription do
+    use GenServer
+
+    @impl GenServer
+    def init(:ok), do: {:ok, :ok}
+
+    @impl GenServer
+    def handle_call(:stop_unless_subscribed, _from, state), do: {:stop, :shutdown, state}
+  end
+
   describe "single stream subscription" do
     setup [:append_events_to_another_stream]
 
@@ -871,6 +883,32 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
 
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should be deleted when its subscription is already terminating", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      name =
+        {Module.concat(@event_store, Subscriptions.Registry), {stream_uuid, subscription_name}}
+
+      {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
+
+      Wait.until(fn -> assert :undefined = Registry.whereis_name(name) end)
+
+      {:ok, terminating} =
+        GenServer.start(TerminatingSubscription, :ok, name: {:via, Registry, name})
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      refute Process.alive?(terminating)
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
