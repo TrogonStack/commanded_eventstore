@@ -85,10 +85,10 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @doc """
-  Whether any subscriber is still connected to the subscription.
+  Stop the subscription, unless a subscriber is still connected to it.
   """
-  def has_subscribers?(subscription) do
-    GenServer.call(subscription, :has_subscribers?)
+  def stop_unless_subscribed(subscription) do
+    GenServer.call(subscription, :stop_unless_subscribed)
   end
 
   @doc false
@@ -252,12 +252,16 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @impl GenServer
-  def handle_call(:has_subscribers?, _from, %Subscription{} = state) do
+  def handle_call(:stop_unless_subscribed, _from, %Subscription{} = state) do
     %Subscription{
       subscription: %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}}
     } = state
 
-    {:reply, subscribers != %{}, state}
+    if subscribers == %{} do
+      {:stop, :shutdown, :ok, state}
+    else
+      {:reply, {:error, :subscription_has_subscribers}, state}
+    end
   end
 
   @impl GenServer

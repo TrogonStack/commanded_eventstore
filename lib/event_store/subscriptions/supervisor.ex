@@ -45,15 +45,21 @@ defmodule EventStore.Subscriptions.Supervisor do
         :ok
 
       subscription ->
-        # Terminating through the supervisor rather than asking the subscription to stop itself,
-        # so that the checkpoint written while it terminates cannot race the caller deleting the
-        # subscription it belongs to.
-        if Subscription.has_subscribers?(subscription) do
-          {:error, :subscription_has_subscribers}
-        else
-          supervisor = Module.concat(event_store, __MODULE__)
+        ref = Process.monitor(subscription)
 
-          DynamicSupervisor.terminate_child(supervisor, subscription)
+        # Letting the subscription itself decide keeps a subscriber that connects concurrently from
+        # being torn down, and waiting for it to go down keeps the checkpoint written while it
+        # terminates from racing the caller deleting the subscription it belongs to.
+        case Subscription.stop_unless_subscribed(subscription) do
+          :ok ->
+            receive do
+              {:DOWN, ^ref, :process, ^subscription, _reason} -> :ok
+            end
+
+          {:error, _error} = error ->
+            Process.demonitor(ref, [:flush])
+
+            error
         end
     end
   end

@@ -873,11 +873,92 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
+
+    test "should not disconnect a subscriber that connects while the delete is in flight",
+         %{subscription_name: subscription_name} = context do
+      stream_uuid = UUID.uuid4()
+      test = self()
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+      supervisor = Module.concat(@event_store, Subscriptions.Supervisor)
+
+      # Suspended so that a stop split back into a check and a terminate cannot reach the terminate
+      # before the connect it is racing has been served, which is the interleaving this guards.
+      :ok = :sys.suspend(supervisor)
+      :ok = :sys.suspend(subscription)
+
+      deleting =
+        Task.async(fn -> EventStore.delete_subscription(stream_uuid, subscription_name) end)
+
+      assert_enqueued(subscription, 1)
+
+      spawn(fn ->
+        result =
+          try do
+            Subscription.connect(subscription, self(), [])
+          catch
+            :exit, reason -> {:exit, reason}
+          end
+
+        send(test, {:connect, result})
+      end)
+
+      assert_enqueued(subscription, 2)
+
+      :ok = :sys.resume(subscription)
+
+      assert_receive {:connect, connect_result}
+
+      :ok = :sys.resume(supervisor)
+
+      assert :ok = Task.await(deleting)
+
+      case connect_result do
+        {:ok, ^subscription} -> assert Process.alive?(subscription)
+        {:exit, _reason} -> refute Process.alive?(subscription)
+      end
+    end
   end
 
   # OTP 28 reports the `gen_server` hibernation loop where earlier releases
   # reported `:erlang.hibernate/3`.
   @hibernated_functions [{:erlang, :hibernate, 3}, {:gen_server, :loop_hibernate, 4}]
+
+  defp assert_enqueued(pid, count) do
+    Wait.until(fn ->
+      assert {:message_queue_len, ^count} = Process.info(pid, :message_queue_len)
+    end)
+  end
+
+  # A started subscription with no subscriber connected to it yet, which is the only way a live
+  # subscription has none: losing its last subscriber shuts it down.
+  defp start_unconnected_subscription(context, stream_uuid) do
+    %{
+      conn: conn,
+      schema: schema,
+      serializer: serializer,
+      correlation_id_type: correlation_id_type,
+      causation_id_type: causation_id_type,
+      subscription_name: subscription_name
+    } = context
+
+    {:ok, subscription} =
+      Subscriptions.Supervisor.start_subscription(
+        event_store: @event_store,
+        conn: conn,
+        schema: schema,
+        serializer: serializer,
+        correlation_id_type: correlation_id_type,
+        causation_id_type: causation_id_type,
+        retry_interval: 60_000,
+        stream_uuid: stream_uuid,
+        subscription_name: subscription_name,
+        buffer_size: 1,
+        start_from: 0
+      )
+
+    subscription
+  end
 
   defp assert_hibernated(pid) do
     assert {:current_function, current_function} = Process.info(pid, :current_function)
