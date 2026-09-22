@@ -535,6 +535,7 @@ defmodule EventStore do
                 |> Keyword.merge(
                   conn: conn,
                   event_store: name,
+                  telemetry_metadata: Telemetry.metadata(__MODULE__, opts),
                   query_timeout: query_timeout,
                   schema: schema,
                   serializer: serializer,

@@ -305,11 +305,13 @@ with `stream_uuid: "$all"` in the metadata, and
 with the same stream identifier.
 
 `:subscription_checkpoint` is emitted by the subscription process itself, once
-per checkpoint written to storage, rather than by a caller. Its metadata
-includes `:stream_uuid`, `:subscription_name`, and the `:last_seen` event number
-being persisted. A subscription checkpoints when its pending acknowledgements
-reach `checkpoint_threshold`, when `checkpoint_after` elapses, and once more
-while it terminates.
+per checkpoint written to storage, rather than by a caller. Alongside the same
+`:event_store` and `:name` every other operation carries, its metadata includes
+`:stream_uuid`, `:subscription_name`, and the `:last_seen` event number being
+persisted. A subscription checkpoints when its pending acknowledgements reach
+`checkpoint_threshold`, when `checkpoint_after` elapses, when its last
+subscriber leaves, and again while terminating with acknowledgements still
+pending.
 
 Stop metadata includes a normalized `:result` for all instrumented operations.
 Operations that return `:ok` emit `result: :ok`. Operations that return

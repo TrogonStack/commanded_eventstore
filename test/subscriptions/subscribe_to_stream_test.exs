@@ -917,6 +917,43 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should wait for a checkpoint that outlasts the default call timeout", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      block_checkpoint()
+
+      # Losing its subscriber outright, rather than being unsubscribed, leaves nobody waiting on a
+      # call of their own, so the delete brings the only deadline still in play.
+      Process.exit(subscriber, :kill)
+
+      assert_receive {:checkpointing, ^subscription}
+
+      deleting =
+        Task.async(fn -> EventStore.delete_subscription(stream_uuid, subscription_name) end)
+
+      # Longer than the five seconds a `GenServer.call/2` waits by default, and shorter than the
+      # fifteen a checkpoint write is given, so giving up would be giving up on a live write.
+      refute Task.yield(deleting, 6_000)
+
+      send(subscription, :release_checkpoint)
+
+      assert :ok = Task.await(deleting)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
     test "should write its checkpoint while it still owns the row, not while terminating", %{
       subscription_name: subscription_name
     } do

@@ -379,6 +379,39 @@ defmodule EventStore.TelemetryTest do
     refute_exception_event(:subscription_checkpoint)
   end
 
+  test "names a named instance the same way every other checkpoint metadata does" do
+    start_supervised!({TestEventStore, name: :eventstore1, schema: "public"})
+
+    stream_uuid = UUID.uuid4()
+    subscription_name = "telemetry-" <> UUID.uuid4()
+
+    assert {:ok, subscription} =
+             EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+               name: :eventstore1
+             )
+
+    assert_receive {:subscribed, ^subscription}
+
+    attach_telemetry(:subscription_checkpoint)
+
+    assert :ok =
+             EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1),
+               name: :eventstore1
+             )
+
+    assert_receive {:events, events}
+    assert :ok = Subscription.ack(subscription, events)
+
+    assert_stop_event(:subscription_checkpoint,
+      event_store: EventStore,
+      last_seen: 1,
+      name: :eventstore1,
+      result: :ok,
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name
+    )
+  end
+
   test "emits start and stop telemetry for paginate_streams" do
     stream_uuid = "telemetry-" <> UUID.uuid4()
 

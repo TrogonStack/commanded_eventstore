@@ -28,6 +28,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         checkpoint_after: opts[:checkpoint_after] || 0,
         checkpoint_threshold: opts[:checkpoint_threshold] || 1,
         query_timeout: opts[:query_timeout] || 15_000,
+        telemetry_metadata: Keyword.get(opts, :telemetry_metadata, %{}),
         max_size: opts[:max_size] || 1_000,
         transient: Keyword.get(opts, :transient, false)
       }
@@ -731,22 +732,22 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp persist_checkpoint(%SubscriptionState{transient: false} = data) do
     %SubscriptionState{
       conn: conn,
-      event_store: event_store,
       schema: schema,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
       last_ack: last_ack,
       query_timeout: query_timeout,
-      checkpoints_pending: checkpoints_pending
+      checkpoints_pending: checkpoints_pending,
+      telemetry_metadata: telemetry_metadata
     } = data
 
     if checkpoints_pending > 0 do
-      metadata = %{
-        event_store: event_store,
-        stream_uuid: stream_uuid,
-        subscription_name: subscription_name,
-        last_seen: last_ack
-      }
+      metadata =
+        Map.merge(telemetry_metadata, %{
+          stream_uuid: stream_uuid,
+          subscription_name: subscription_name,
+          last_seen: last_ack
+        })
 
       Telemetry.span(:subscription_checkpoint, metadata, fn ->
         Storage.Subscription.ack_last_seen_event(conn, stream_uuid, subscription_name, last_ack,
