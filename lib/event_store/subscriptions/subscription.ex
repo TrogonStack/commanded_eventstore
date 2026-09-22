@@ -257,10 +257,9 @@ defmodule EventStore.Subscriptions.Subscription do
       subscription: %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}}
     } = state
 
-    if subscribers == %{} do
-      {:stop, :shutdown, :ok, state}
-    else
-      {:reply, {:error, :subscription_has_subscribers}, state}
+    case map_size(subscribers) do
+      0 -> {:stop, :shutdown, :ok, state}
+      _ -> {:reply, {:error, :subscription_has_subscribers}, state}
     end
   end
 
