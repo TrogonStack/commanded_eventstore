@@ -8,6 +8,10 @@ defmodule EventStore.Subscriptions.Supervisor do
   alias EventStore.Subscriptions
   alias EventStore.Subscriptions.Subscription
 
+  # Mirrors the storage `:timeout` a subscription gives its own queries, for the internal callers
+  # that have no configured event store to read one from.
+  @default_timeout 15_000
+
   def start_link(opts) do
     DynamicSupervisor.start_link(__MODULE__, [], opts)
   end
@@ -37,7 +41,7 @@ defmodule EventStore.Subscriptions.Supervisor do
     end
   end
 
-  def stop_subscription(event_store, stream_uuid, subscription_name) do
+  def stop_subscription(event_store, stream_uuid, subscription_name, opts \\ []) do
     name = registry_name(event_store, stream_uuid, subscription_name)
 
     case Registry.whereis_name(name) do
@@ -49,14 +53,21 @@ defmodule EventStore.Subscriptions.Supervisor do
         # the subscription can decide whether a subscriber is still connected to it, so asking has
         # to be a call of our own.
         ref = Process.monitor(subscription)
+        asked_at = System.monotonic_time(:millisecond)
 
-        case stop(subscription) do
+        case stop(subscription, opts) do
           :ok ->
             # Answering is not being gone: the reply is sent before `terminate/2`, where a
             # subscription can still checkpoint. Waiting keeps a stale `last_seen` from landing on
-            # whatever row exists by the time it is written. Unbounded, as `GenServer.stop/3` is.
+            # whatever row exists by the time it is written, and the caller keeps one deadline for
+            # both halves of that.
             receive do
               {:DOWN, ^ref, :process, ^subscription, _reason} -> :ok
+            after
+              remaining(opts, asked_at) ->
+                Process.demonitor(ref, [:flush])
+
+                exit({:timeout, {__MODULE__, :stop_subscription, [subscription]}})
             end
 
           {:error, _error} = error ->
@@ -71,10 +82,17 @@ defmodule EventStore.Subscriptions.Supervisor do
   # subscriber has most likely just unsubscribed, which answers before the subscription it stops
   # has terminated. A timeout is not that: it says the subscription may still be writing, so
   # reading it as nothing left to stop would delete a row out from under a checkpoint.
-  defp stop(subscription) do
-    Subscription.stop(subscription)
+  defp stop(subscription, opts) do
+    Subscription.stop(subscription, opts)
   catch
     :exit, {reason, {GenServer, :call, _args}} when reason != :timeout -> :ok
+  end
+
+  defp remaining(opts, asked_at) do
+    case Keyword.get(opts, :timeout, @default_timeout) do
+      :infinity -> :infinity
+      timeout -> max(timeout - (System.monotonic_time(:millisecond) - asked_at), 0)
+    end
   end
 
   @impl DynamicSupervisor

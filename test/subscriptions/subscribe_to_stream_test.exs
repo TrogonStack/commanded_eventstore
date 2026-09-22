@@ -954,6 +954,45 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should keep the row when it gives up waiting for a checkpoint", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      block_checkpoint()
+
+      Process.exit(subscriber, :kill)
+
+      assert_receive {:checkpointing, ^subscription}
+
+      deleting =
+        Task.async(fn ->
+          try do
+            EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 100)
+          catch
+            :exit, reason -> {:exit, reason}
+          end
+        end)
+
+      assert {:ok, {:exit, {:timeout, _where}}} = Task.yield(deleting, 2_000)
+
+      # Giving up says the subscription may still be writing, so the row it writes to has to stay.
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+
+      send(subscription, :release_checkpoint)
+    end
+
     test "should write its checkpoint while it still owns the row, not while terminating", %{
       subscription_name: subscription_name
     } do

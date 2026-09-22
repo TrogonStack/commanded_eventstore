@@ -14,6 +14,10 @@ defmodule EventStore.Subscriptions.Subscription do
   alias EventStore.RecordedEvent
   alias EventStore.Subscriptions.{SubscriptionFsm, Subscription, SubscriptionState}
 
+  # Mirrors the storage `:timeout` a subscription gives its own queries, for the internal callers
+  # that have no configured event store to read one from.
+  @default_timeout 15_000
+
   defstruct [
     :stream_uuid,
     :subscription_name,
@@ -87,11 +91,12 @@ defmodule EventStore.Subscriptions.Subscription do
   @doc """
   Stop the subscription, unless a subscriber is still connected to it.
 
-  Waits without a deadline, because whatever the subscription is busy with is storage work bounded
-  by its own `query_timeout` and giving up early would answer before it is safe to.
+  Accepts a `:timeout`, in milliseconds or `:infinity`. Whatever the subscription is busy with is
+  storage work bounded by its own `:timeout`, so anything shorter than that gives up on a write
+  that is still going to land.
   """
-  def stop(subscription) do
-    GenServer.call(subscription, :stop, :infinity)
+  def stop(subscription, opts \\ []) do
+    GenServer.call(subscription, :stop, Keyword.get(opts, :timeout, @default_timeout))
   end
 
   @doc false
