@@ -259,7 +259,7 @@ defmodule EventStore.Subscriptions.Subscription do
 
     case map_size(subscribers) do
       0 -> {:stop, :shutdown, :ok, state}
-      _ -> {:reply, {:error, :still_subscribed}, state}
+      _ -> {:reply, {:error, :subscribers_connected}, state}
     end
   end
 

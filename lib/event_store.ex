@@ -1471,16 +1471,16 @@ defmodule EventStore do
     - `subscription_name` is used to identify the existing subscription to
       remove.
 
-  Returns `:ok` on success, or `{:error, :still_subscribed}` when subscribers are still connected
-  to the subscription. Unsubscribe them first, with `c:unsubscribe_from_stream/3`, so that
-  deleting a subscription never disconnects a subscriber that did not ask for it.
+  Returns `:ok` on success, or `{:error, :subscribers_connected}` when subscribers are still
+  connected to the subscription. Unsubscribe them first, with `c:unsubscribe_from_stream/3`, so
+  that deleting a subscription never disconnects a subscriber that did not ask for it.
   """
   @callback delete_subscription(
               stream_uuid :: String.t(),
               subscription_name :: String.t(),
               opts :: options
             ) ::
-              :ok | {:error, :still_subscribed} | {:error, term}
+              :ok | {:error, :subscribers_connected} | {:error, term}
 
   @doc """
   Delete an existing persistent subscription to all streams.
@@ -1488,11 +1488,11 @@ defmodule EventStore do
     - `subscription_name` is used to identify the existing subscription to
       remove.
 
-  Returns `:ok` on success, or `{:error, :still_subscribed}` when subscribers are still connected
-  to the subscription.
+  Returns `:ok` on success, or `{:error, :subscribers_connected}` when subscribers are still
+  connected to the subscription.
   """
   @callback delete_all_streams_subscription(subscription_name :: String.t(), opts :: options) ::
-              :ok | {:error, :still_subscribed} | {:error, term}
+              :ok | {:error, :subscribers_connected} | {:error, term}
 
   @doc """
   Read a snapshot, if available, for a given source.

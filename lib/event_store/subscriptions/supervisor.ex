@@ -47,9 +47,9 @@ defmodule EventStore.Subscriptions.Supervisor do
       subscription ->
         ref = Process.monitor(subscription)
 
-        # Letting the subscription itself decide keeps a subscriber that connects concurrently from
-        # being torn down, and waiting for it to go down keeps the checkpoint written while it
-        # terminates from racing the caller deleting the subscription it belongs to.
+        # Letting the subscription itself decide keeps a subscriber that connects concurrently
+        # from being torn down, and waiting for it to go down keeps the checkpoint written while
+        # it terminates from racing the caller deleting the subscription it belongs to.
         case stop_unless_subscribed(subscription) do
           :ok ->
             receive do

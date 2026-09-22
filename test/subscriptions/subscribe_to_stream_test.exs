@@ -829,7 +829,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       assert_receive {:subscribed, ^subscription}
 
-      assert {:error, :still_subscribed} =
+      assert {:error, :subscribers_connected} =
                EventStore.delete_subscription(stream_uuid, subscription_name)
 
       assert Process.alive?(subscription)
@@ -867,7 +867,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
 
-      assert {:error, :still_subscribed} =
+      assert {:error, :subscribers_connected} =
                EventStore.delete_subscription(stream_uuid, subscription_name)
 
       assert Process.alive?(subscription)
@@ -920,8 +920,9 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       subscription = start_unconnected_subscription(context, stream_uuid)
       supervisor = Module.concat(@event_store, Subscriptions.Supervisor)
 
-      # Suspended so that a stop split back into a check and a terminate cannot reach the terminate
-      # before the connect it is racing has been served, which is the interleaving this guards.
+      # Suspended so that a stop split back into a check and a terminate cannot reach the
+      # terminate before the connect it is racing has been served, which is the interleaving this
+      # guards.
       :ok = :sys.suspend(supervisor)
       :ok = :sys.suspend(subscription)
 
