@@ -535,6 +535,7 @@ defmodule EventStore do
                 |> Keyword.merge(
                   conn: conn,
                   event_store: name,
+                  telemetry_metadata: Telemetry.metadata(__MODULE__, opts),
                   query_timeout: query_timeout,
                   schema: schema,
                   serializer: serializer,
@@ -578,10 +579,10 @@ defmodule EventStore do
           %{stream_uuid: stream_uuid, subscription_name: subscription_name},
           fn ->
             name = name(opts)
+            {conn, opts} = parse_opts(opts)
 
-            with :ok <- Subscriptions.stop_subscription(name, stream_uuid, subscription_name) do
-              {conn, opts} = parse_opts(opts)
-
+            with :ok <-
+                   Subscriptions.stop_subscription(name, stream_uuid, subscription_name, opts) do
               Subscriptions.delete_subscription(conn, stream_uuid, subscription_name, opts)
             end
           end
@@ -1471,14 +1472,16 @@ defmodule EventStore do
     - `subscription_name` is used to identify the existing subscription to
       remove.
 
-  Returns `:ok` on success.
+  Returns `:ok` on success, or `{:error, :subscribers_connected}` when subscribers are still
+  connected to the subscription. Unsubscribe them first, with `c:unsubscribe_from_stream/3`, so
+  that deleting a subscription never disconnects a subscriber that did not ask for it.
   """
   @callback delete_subscription(
               stream_uuid :: String.t(),
               subscription_name :: String.t(),
               opts :: options
             ) ::
-              :ok | {:error, term}
+              :ok | {:error, :subscribers_connected} | {:error, term}
 
   @doc """
   Delete an existing persistent subscription to all streams.
@@ -1486,10 +1489,11 @@ defmodule EventStore do
     - `subscription_name` is used to identify the existing subscription to
       remove.
 
-  Returns `:ok` on success.
+  Returns `:ok` on success, or `{:error, :subscribers_connected}` when subscribers are still
+  connected to the subscription.
   """
   @callback delete_all_streams_subscription(subscription_name :: String.t(), opts :: options) ::
-              :ok | {:error, term}
+              :ok | {:error, :subscribers_connected} | {:error, term}
 
   @doc """
   Read a snapshot, if available, for a given source.

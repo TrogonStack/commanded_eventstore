@@ -19,6 +19,7 @@ defmodule EventStore.Subscriptions.SubscriptionState do
     :partition_by,
     :query_timeout,
     :lock_ref,
+    telemetry_metadata: %{},
     correlation_id_type: "uuid",
     causation_id_type: "uuid",
     last_received: 0,

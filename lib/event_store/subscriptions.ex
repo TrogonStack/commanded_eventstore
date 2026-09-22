@@ -22,7 +22,7 @@ defmodule EventStore.Subscriptions do
   end
 
   defdelegate unsubscribe_from_stream(event_store, stream_uuid, name), to: SubscriptionsSupervisor
-  defdelegate stop_subscription(event_store, stream_uuid, name), to: SubscriptionsSupervisor
+  defdelegate stop_subscription(event_store, stream_uuid, name, opts), to: SubscriptionsSupervisor
   defdelegate delete_subscription(conn, stream_uuid, subscription_name, opts), to: Storage
 
   @doc """
