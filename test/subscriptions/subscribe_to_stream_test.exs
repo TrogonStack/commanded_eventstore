@@ -829,7 +829,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       assert_receive {:subscribed, ^subscription}
 
-      assert {:error, :subscription_has_subscribers} =
+      assert {:error, :still_subscribed} =
                EventStore.delete_subscription(stream_uuid, subscription_name)
 
       assert Process.alive?(subscription)
@@ -867,7 +867,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
       :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
 
-      assert {:error, :subscription_has_subscribers} =
+      assert {:error, :still_subscribed} =
                EventStore.delete_subscription(stream_uuid, subscription_name)
 
       assert Process.alive?(subscription)
