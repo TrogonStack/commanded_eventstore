@@ -50,7 +50,7 @@ defmodule EventStore.Subscriptions.Supervisor do
         # Letting the subscription itself decide keeps a subscriber that connects concurrently
         # from being torn down, and waiting for it to go down keeps the checkpoint written while
         # it terminates from racing the caller deleting the subscription it belongs to.
-        case stop_unless_subscribed(subscription) do
+        case stop(subscription) do
           :ok ->
             receive do
               {:DOWN, ^ref, :process, ^subscription, _reason} -> :ok
@@ -67,8 +67,8 @@ defmodule EventStore.Subscriptions.Supervisor do
   # A subscription that goes down while being asked to stop leaves nothing to stop. Its last
   # subscriber has most likely just unsubscribed, which answers before the subscription it stops
   # has terminated. A timeout is not that, and has to reach the caller.
-  defp stop_unless_subscribed(subscription) do
-    Subscription.stop_unless_subscribed(subscription)
+  defp stop(subscription) do
+    Subscription.stop(subscription)
   catch
     :exit, {reason, {GenServer, :call, _args}} when reason != :timeout -> :ok
   end

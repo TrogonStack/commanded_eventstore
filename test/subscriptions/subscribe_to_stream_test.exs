@@ -33,7 +33,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     def init(:ok), do: {:ok, :ok}
 
     @impl GenServer
-    def handle_call(:stop_unless_subscribed, _from, state), do: {:stop, :shutdown, state}
+    def handle_call(:stop, _from, state), do: {:stop, :shutdown, state}
   end
 
   describe "single stream subscription" do

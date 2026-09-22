@@ -87,8 +87,8 @@ defmodule EventStore.Subscriptions.Subscription do
   @doc """
   Stop the subscription, unless a subscriber is still connected to it.
   """
-  def stop_unless_subscribed(subscription) do
-    GenServer.call(subscription, :stop_unless_subscribed)
+  def stop(subscription) do
+    GenServer.call(subscription, :stop)
   end
 
   @doc false
@@ -252,7 +252,7 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @impl GenServer
-  def handle_call(:stop_unless_subscribed, _from, %Subscription{} = state) do
+  def handle_call(:stop, _from, %Subscription{} = state) do
     %Subscription{
       subscription: %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}}
     } = state
