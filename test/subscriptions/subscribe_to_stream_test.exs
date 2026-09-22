@@ -917,6 +917,35 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should write its checkpoint while it still owns the row, not while terminating", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      record_checkpoints()
+
+      send(subscriber, :unsubscribe)
+
+      assert_receive {:unsubscribed, :ok}
+      assert_receive {:checkpoint, %{last_seen: 1}}
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      # A checkpoint written any later has no row of its own left to write to, and its `last_seen`
+      # would land on whichever subscription holds the name next.
+      refute_receive {:checkpoint, _metadata}
+    end
+
     test "should keep serving its subscriber after refusing to be deleted", %{
       subscription_name: subscription_name,
       schema: schema
@@ -1126,6 +1155,24 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     end
   end
 
+  def record_checkpoint_event(_event, _measurements, metadata, test) do
+    send(test, {:checkpoint, metadata})
+  end
+
+  defp record_checkpoints do
+    handler_id = "#{inspect(__MODULE__)}-checkpoints-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:eventstore, :subscription_checkpoint, :stop],
+        &__MODULE__.record_checkpoint_event/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
   defp block_checkpoint do
     handler_id = "#{inspect(__MODULE__)}-checkpoint-#{System.unique_integer([:positive])}"
 
@@ -1146,16 +1193,19 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
   defp start_subscriber(stream_uuid, subscription_name) do
     test = self()
 
-    spawn(fn ->
-      {:ok, subscription} =
-        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
-          checkpoint_threshold: 100
-        )
+    start_supervised!(
+      {Task,
+       fn ->
+         {:ok, subscription} =
+           EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+             checkpoint_threshold: 100
+           )
 
-      send(test, {:subscriber, self(), subscription})
+         send(test, {:subscriber, self(), subscription})
 
-      forward_to_test(test, subscription)
-    end)
+         forward_to_test(test, subscription)
+       end}
+    )
   end
 
   defp forward_to_test(test, subscription) do

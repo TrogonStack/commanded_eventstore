@@ -45,13 +45,16 @@ defmodule EventStore.Subscriptions.Supervisor do
         :ok
 
       subscription ->
+        # Shaped after `:proc_lib.stop/3`, which is what `GenServer.stop/3` runs, except that only
+        # the subscription can decide whether a subscriber is still connected to it, so asking has
+        # to be a call of our own.
         ref = Process.monitor(subscription)
 
-        # Letting the subscription itself decide keeps a subscriber that connects concurrently
-        # from being torn down, and waiting for it to go down keeps the checkpoint written while
-        # it terminates from racing the caller deleting the subscription it belongs to.
         case stop(subscription) do
           :ok ->
+            # Answering is not being gone: the reply is sent before `terminate/2`, where a
+            # subscription can still checkpoint. Waiting keeps a stale `last_seen` from landing on
+            # whatever row exists by the time it is written. Unbounded, as `GenServer.stop/3` is.
             receive do
               {:DOWN, ^ref, :process, ^subscription, _reason} -> :ok
             end
