@@ -86,9 +86,12 @@ defmodule EventStore.Subscriptions.Subscription do
 
   @doc """
   Stop the subscription, unless a subscriber is still connected to it.
+
+  Waits without a deadline, because whatever the subscription is busy with is storage work bounded
+  by its own `query_timeout` and giving up early would answer before it is safe to.
   """
   def stop(subscription) do
-    GenServer.call(subscription, :stop)
+    GenServer.call(subscription, :stop, :infinity)
   end
 
   @doc false

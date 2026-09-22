@@ -69,7 +69,8 @@ defmodule EventStore.Subscriptions.Supervisor do
 
   # A subscription that goes down while being asked to stop leaves nothing to stop. Its last
   # subscriber has most likely just unsubscribed, which answers before the subscription it stops
-  # has terminated. A timeout is not that, and has to reach the caller.
+  # has terminated. A timeout is not that: it says the subscription may still be writing, so
+  # reading it as nothing left to stop would delete a row out from under a checkpoint.
   defp stop(subscription) do
     Subscription.stop(subscription)
   catch
