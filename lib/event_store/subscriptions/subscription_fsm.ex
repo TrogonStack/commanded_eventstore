@@ -1,7 +1,7 @@
 defmodule EventStore.Subscriptions.SubscriptionFsm do
   @moduledoc false
 
-  alias EventStore.{AdvisoryLocks, PubSub, RecordedEvent, Storage}
+  alias EventStore.{AdvisoryLocks, PubSub, RecordedEvent, Storage, Telemetry}
   alias EventStore.Streams.Stream
   alias EventStore.Subscriptions.{SubscriptionState, Subscriber}
 
@@ -731,6 +731,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp persist_checkpoint(%SubscriptionState{transient: false} = data) do
     %SubscriptionState{
       conn: conn,
+      event_store: event_store,
       schema: schema,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
@@ -740,10 +741,19 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     } = data
 
     if checkpoints_pending > 0 do
-      Storage.Subscription.ack_last_seen_event(conn, stream_uuid, subscription_name, last_ack,
-        schema: schema,
-        timeout: query_timeout
-      )
+      metadata = %{
+        event_store: event_store,
+        stream_uuid: stream_uuid,
+        subscription_name: subscription_name,
+        last_seen: last_ack
+      }
+
+      Telemetry.span(:subscription_checkpoint, metadata, fn ->
+        Storage.Subscription.ack_last_seen_event(conn, stream_uuid, subscription_name, last_ack,
+          schema: schema,
+          timeout: query_timeout
+        )
+      end)
     end
 
     %SubscriptionState{data | checkpoints_pending: 0}

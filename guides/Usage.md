@@ -292,6 +292,7 @@ The first pass covers these operations:
 - `:paginate_streams`
 - `:subscribe_to_stream`
 - `:delete_subscription`
+- `:subscription_checkpoint`
 - `:read_snapshot`
 - `:record_snapshot`
 - `:delete_snapshot`
@@ -302,6 +303,13 @@ Alias operations reuse the same event names. For example,
 with `stream_uuid: "$all"` in the metadata, and
 `subscribe_to_all_streams/3` emits `[:eventstore, :subscribe_to_stream, ...]`
 with the same stream identifier.
+
+`:subscription_checkpoint` is emitted by the subscription process itself, once
+per checkpoint written to storage, rather than by a caller. Its metadata
+includes `:stream_uuid`, `:subscription_name`, and the `:last_seen` event number
+being persisted. A subscription checkpoints when its pending acknowledgements
+reach `checkpoint_threshold`, when `checkpoint_after` elapses, and once more
+while it terminates.
 
 Stop metadata includes a normalized `:result` for all instrumented operations.
 Operations that return `:ok` emit `result: :ok`. Operations that return
