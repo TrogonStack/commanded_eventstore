@@ -313,6 +313,72 @@ defmodule EventStore.TelemetryTest do
     refute Process.alive?(subscription)
   end
 
+  test "emits stop telemetry for a delete_subscription its subscribers refuse" do
+    stream_uuid = UUID.uuid4()
+    subscription_name = "telemetry-" <> UUID.uuid4()
+
+    assert {:ok, subscription} =
+             EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+    assert_receive {:subscribed, ^subscription}
+
+    attach_telemetry(:delete_subscription)
+
+    assert {:error, :subscribers_connected} =
+             EventStore.delete_subscription(stream_uuid, subscription_name)
+
+    assert_start_event(:delete_subscription,
+      event_store: EventStore,
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name
+    )
+
+    assert_stop_event(:delete_subscription,
+      event_store: EventStore,
+      result: {:error, :subscribers_connected},
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name
+    )
+
+    refute_exception_event(:delete_subscription)
+    assert Process.alive?(subscription)
+    assert :ok = Subscription.unsubscribe(subscription)
+  end
+
+  test "emits start and stop telemetry for a subscription checkpoint" do
+    stream_uuid = UUID.uuid4()
+    subscription_name = "telemetry-" <> UUID.uuid4()
+
+    assert {:ok, subscription} =
+             EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+    assert_receive {:subscribed, ^subscription}
+
+    attach_telemetry(:subscription_checkpoint)
+
+    assert :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+    assert_receive {:events, events}
+    assert :ok = Subscription.ack(subscription, events)
+
+    assert_start_event(:subscription_checkpoint,
+      event_store: EventStore,
+      last_seen: 1,
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name
+    )
+
+    assert_stop_event(:subscription_checkpoint,
+      event_store: EventStore,
+      last_seen: 1,
+      result: :ok,
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name
+    )
+
+    refute_exception_event(:subscription_checkpoint)
+  end
+
   test "emits start and stop telemetry for paginate_streams" do
     stream_uuid = "telemetry-" <> UUID.uuid4()
 

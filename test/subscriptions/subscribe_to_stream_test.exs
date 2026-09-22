@@ -24,18 +24,6 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     {:ok, %{subscription_name: subscription_name}}
   end
 
-  # A subscription that has begun terminating answers no calls: it dies with the call still in its
-  # mailbox, which `GenServer.call` reports to its caller as an exit.
-  defmodule TerminatingSubscription do
-    use GenServer
-
-    @impl GenServer
-    def init(:ok), do: {:ok, :ok}
-
-    @impl GenServer
-    def handle_call(:stop, _from, state), do: {:stop, :shutdown, state}
-  end
-
   describe "single stream subscription" do
     setup [:append_events_to_another_stream]
 
@@ -886,7 +874,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
-    test "should be deleted when its subscription is already terminating", %{
+    test "should be deleted while its subscription is still terminating", %{
       subscription_name: subscription_name,
       schema: schema
     } do
@@ -895,20 +883,186 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       name =
         {Module.concat(@event_store, Subscriptions.Registry), {stream_uuid, subscription_name}}
 
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      block_checkpoint()
+
+      send(subscriber, :unsubscribe)
+
+      # Losing its last subscriber makes the subscription write its checkpoint and then stop, so
+      # holding that write holds it registered and answering nothing.
+      assert_receive {:checkpointing, ^subscription}
+      assert ^subscription = Registry.whereis_name(name)
+
+      deleting =
+        Task.async(fn -> EventStore.delete_subscription(stream_uuid, subscription_name) end)
+
+      refute Task.yield(deleting, 100)
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+
+      send(subscription, :release_checkpoint)
+
+      assert_receive {:unsubscribed, :ok}
+
+      assert :ok = Task.await(deleting)
+      refute Process.alive?(subscription)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should keep serving its subscriber after refusing to be deleted", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
       {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
 
       assert_receive {:subscribed, ^subscription}
 
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = first}
+      :ok = Subscription.ack(subscription, first)
+
+      assert {:error, :subscribers_connected} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      :ok = EventStore.append_to_stream(stream_uuid, 1, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 2}] = second}
+      :ok = Subscription.ack(subscription, second)
+
+      Wait.until(fn ->
+        assert {:ok, [%Storage.Subscription{last_seen: 2}]} =
+                 Storage.subscriptions(@conn, schema: schema)
+      end)
+    end
+
+    test "should leave no monitor behind when it refuses", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+
+      assert {:error, :subscribers_connected} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
       :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
 
-      Wait.until(fn -> assert :undefined = Registry.whereis_name(name) end)
+      Wait.until(fn -> refute Process.alive?(subscription) end)
 
-      {:ok, terminating} =
-        GenServer.start(TerminatingSubscription, :ok, name: {:via, Registry, name})
+      refute_receive {:DOWN, _ref, :process, ^subscription, _reason}
+    end
+
+    test "should be deleted when it was persisted without being started", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
 
       assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
 
-      refute Process.alive?(terminating)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should be deleted once when several callers delete it at the same time",
+         %{subscription_name: subscription_name} = context do
+      stream_uuid = UUID.uuid4()
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+
+      results =
+        1..5
+        |> Task.async_stream(
+          fn _ -> EventStore.delete_subscription(stream_uuid, subscription_name) end,
+          max_concurrency: 5,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert results == [:ok, :ok, :ok, :ok, :ok]
+      refute Process.alive?(subscription)
+    end
+
+    test "should let the same subscription name be used again after being deleted", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      {:ok, subscription} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+
+      :ok = Subscription.ack(subscription, events)
+      :ok = EventStore.unsubscribe_from_stream(stream_uuid, subscription_name)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      resubscribed =
+        Wait.until(fn ->
+          assert {:ok, resubscribed} =
+                   EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+          resubscribed
+        end)
+
+      assert resubscribed != subscription
+
+      assert_receive {:subscribed, ^resubscribed}
+
+      # The deleted checkpoint is what makes the already acknowledged event arrive again.
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+    end
+
+    test "should not delete an all streams subscription while a subscriber is connected", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      {:ok, subscription} = EventStore.subscribe_to_all_streams(subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+
+      assert {:error, :subscribers_connected} =
+               EventStore.delete_all_streams_subscription(subscription_name)
+
+      assert Process.alive?(subscription)
+
+      assert {:ok, [%Storage.Subscription{stream_uuid: "$all"}]} =
+               Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should delete an all streams subscription once its subscriber has gone", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      {:ok, subscription} = EventStore.subscribe_to_all_streams(subscription_name, self())
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.unsubscribe_from_all_streams(subscription_name)
+
+      assert :ok = EventStore.delete_all_streams_subscription(subscription_name)
+
+      refute Process.alive?(subscription)
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
@@ -962,6 +1116,58 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
   # OTP 28 reports the `gen_server` hibernation loop where earlier releases
   # reported `:erlang.hibernate/3`.
   @hibernated_functions [{:erlang, :hibernate, 3}, {:gen_server, :loop_hibernate, 4}]
+
+  # Runs in the subscription process, so a checkpoint write holds it wherever it was written from.
+  def block_checkpoint_event(_event, _measurements, _metadata, test) do
+    send(test, {:checkpointing, self()})
+
+    receive do
+      :release_checkpoint -> :ok
+    end
+  end
+
+  defp block_checkpoint do
+    handler_id = "#{inspect(__MODULE__)}-checkpoint-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:eventstore, :subscription_checkpoint, :start],
+        &__MODULE__.block_checkpoint_event/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  # Subscribes from its own process, so that an unsubscribe the subscription cannot answer yet
+  # blocks the subscriber rather than the test. The threshold keeps an acknowledgement from
+  # writing the checkpoint that unsubscribing then has to write.
+  defp start_subscriber(stream_uuid, subscription_name) do
+    test = self()
+
+    spawn(fn ->
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      send(test, {:subscriber, self(), subscription})
+
+      forward_to_test(test, subscription)
+    end)
+  end
+
+  defp forward_to_test(test, subscription) do
+    receive do
+      :unsubscribe ->
+        send(test, {:unsubscribed, Subscription.unsubscribe(subscription)})
+
+      message ->
+        send(test, message)
+        forward_to_test(test, subscription)
+    end
+  end
 
   defp assert_enqueued(pid, count) do
     Wait.until(fn ->
