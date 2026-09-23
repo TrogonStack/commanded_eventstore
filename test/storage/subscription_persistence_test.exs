@@ -133,6 +133,74 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
              Storage.ack_last_seen_event(conn, subscription_id, 1, schema: "no_such_schema")
   end
 
+  test "ack last seen event for a subscription that never existed", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    assert {:error, :subscription_not_found} =
+             Storage.ack_last_seen_event(conn, subscription_id + 1_000, 1, schema: schema)
+
+    assert {:ok, %Storage.Subscription{last_seen: nil}} = read_subscription(context)
+  end
+
+  test "ack last seen event twice at the same position", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+
+    # Postgres counts the rows it matched rather than the rows it changed, so an acknowledgement
+    # that moves nothing is still an acknowledgement its row accepted.
+    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+
+    assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
+  end
+
+  test "ack last seen event at the position a subscription starts from", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 0, schema: schema)
+
+    # Zero is a position that was acknowledged, where null is a subscription that never has.
+    assert {:ok, %Storage.Subscription{last_seen: 0}} = read_subscription(context)
+  end
+
+  test "ack last seen event leaves everything but the position alone", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{} = before} = subscribe_to_stream(context)
+
+    :ok = Storage.ack_last_seen_event(conn, before.subscription_id, 3, schema: schema)
+
+    assert {:ok, %Storage.Subscription{} = after_ack} = read_subscription(context)
+
+    assert after_ack == %Storage.Subscription{before | last_seen: 3}
+  end
+
+  test "ack last seen event does not guard against a position going backwards", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    :ok = Storage.ack_last_seen_event(conn, subscription_id, 5, schema: schema)
+    :ok = Storage.ack_last_seen_event(conn, subscription_id, 2, schema: schema)
+
+    # Storage takes the position it is given. Nothing reaches here out of order, because the one
+    # process that owns a row acknowledges in order, and refusing the write would be indistinguish
+    # able from the row being gone.
+    assert {:ok, %Storage.Subscription{last_seen: 2}} = read_subscription(context)
+  end
+
+  defp read_subscription(context) do
+    %{conn: conn, schema: schema} = context
+
+    Storage.Subscription.subscription(conn, @all_stream, @subscription_name, schema: schema)
+  end
+
   def ack_last_seen_event(context, last_seen) do
     %{conn: conn, schema: schema} = context
 

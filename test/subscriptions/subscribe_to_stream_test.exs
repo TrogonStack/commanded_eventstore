@@ -1473,6 +1473,80 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert_receive {:events, [%RecordedEvent{event_number: 1}]}
     end
 
+    test "should leave no down message with the caller when it deletes a live subscription",
+         %{
+           subscription_name: subscription_name,
+           schema: schema
+         } = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      _subscription = start_unconnected_subscription(context, stream_uuid)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      # The delete watches the subscription from whichever process asked for it, so a monitor it
+      # does not clean up becomes an unexpected message in a caller that is a `GenServer`.
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should leave no down message with the caller when there is nothing running", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should leave no down message with the caller when the delete fails in storage",
+         %{
+           subscription_name: subscription_name,
+           schema: schema
+         } = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      _subscription =
+        start_unconnected_subscription(context, stream_uuid, schema: "no_such_schema")
+
+      assert {:error, %Postgrex.Error{}} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should keep the subscription and its row when it is given no time at all", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 0)
+               )
+
+      # Giving up is not being gone: the subscription may still be writing, and deleting its row
+      # from here would delete it out from under that write.
+      assert Process.alive?(slow)
+      assert {:ok, [%Storage.Subscription{}]} = Storage.subscriptions(@conn, schema: schema)
+    end
+
     test "should leave the other subscriptions running when it stops", %{
       subscription_name: subscription_name,
       schema: schema
