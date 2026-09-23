@@ -68,9 +68,9 @@ defmodule EventStore.Subscriptions.Supervisor do
             error
 
           reply ->
-            # Answering is not being gone: the reply is sent before `terminate/2` has run, and a
-            # caller that subscribes again under the same name races a process that still holds it.
-            # One deadline covers being answered and being gone.
+            # Answering is not being gone, and a caller that subscribes again under the same name
+            # the moment it is answered races a process that still holds it. One deadline covers
+            # being answered and being gone.
             receive do
               {:DOWN, ^ref, :process, ^subscription, _reason} -> reply
             after
