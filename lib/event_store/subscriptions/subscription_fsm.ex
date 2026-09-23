@@ -210,6 +210,27 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
   def checkpoint(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
+  # A subscription creates its own row when it subscribes, so deleting that row is the
+  # subscription's to do as well. Nothing can remain pending afterwards, because a checkpoint has
+  # no row left to be written to.
+  def delete(%__MODULE__{data: %SubscriptionState{} = data} = fsm) do
+    %SubscriptionState{
+      conn: conn,
+      schema: schema,
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name,
+      query_timeout: query_timeout
+    } = data
+
+    reply =
+      Storage.Subscription.delete_subscription(conn, stream_uuid, subscription_name,
+        schema: schema,
+        timeout: query_timeout
+      )
+
+    {reply, %__MODULE__{fsm | data: %SubscriptionState{data | checkpoints_pending: 0}}}
+  end
+
   # Notify events when subscribed
   def notify_events(
         %__MODULE__{state: :subscribed, data: %SubscriptionState{} = data} = fsm,
@@ -735,6 +756,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       schema: schema,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
+      subscription_id: subscription_id,
       last_ack: last_ack,
       query_timeout: query_timeout,
       checkpoints_pending: checkpoints_pending,
@@ -749,12 +771,24 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
           last_seen: last_ack
         })
 
-      Telemetry.span(:subscription_checkpoint, metadata, fn ->
-        Storage.Subscription.ack_last_seen_event(conn, stream_uuid, subscription_name, last_ack,
-          schema: schema,
-          timeout: query_timeout
-        )
-      end)
+      result =
+        Telemetry.span(:subscription_checkpoint, metadata, fn ->
+          Storage.Subscription.ack_last_seen_event(conn, subscription_id, last_ack,
+            schema: schema,
+            timeout: query_timeout
+          )
+        end)
+
+      # Reaching no row means the subscription being checkpointed has been deleted. Subscribing
+      # again would recreate it at the position the delete removed, so the subscription stops
+      # instead and leaves its subscribers to subscribe from wherever the delete left them.
+      case result do
+        {:error, :subscription_not_found} ->
+          send(self(), {:checkpoint_failed, :subscription_not_found})
+
+        _ ->
+          :ok
+      end
     end
 
     %SubscriptionState{data | checkpoints_pending: 0}

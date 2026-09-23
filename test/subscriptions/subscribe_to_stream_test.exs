@@ -1216,6 +1216,90 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
         {:exit, _reason} -> refute Process.alive?(subscription)
       end
     end
+
+    test "should delete its own row, rather than leave it to whoever asked",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      # Asking the subscription directly, with nothing else able to delete on its behalf, is what
+      # shows the row going away while the subscription still holds its registered name.
+      assert :ok = Subscription.delete(subscription)
+
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :shutdown}
+    end
+
+    test "should stop when its checkpoint reaches no row of its own", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      ref = Process.monitor(subscription)
+
+      # Deleting the row behind the subscription's back is what a delete racing its name does.
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+    end
+
+    test "should not write its checkpoint onto the subscription that took over its name", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      {:ok, %Storage.Subscription{subscription_id: taken_over, last_seen: last_seen}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      # A checkpoint names the row it belongs to, so the subscription holding the name now keeps
+      # the position it was created with instead of inheriting one it never acknowledged.
+      assert {:ok, [%Storage.Subscription{subscription_id: ^taken_over, last_seen: ^last_seen}]} =
+               Storage.subscriptions(@conn, schema: schema)
+    end
   end
 
   # OTP 28 reports the `gen_server` hibernation loop where earlier releases

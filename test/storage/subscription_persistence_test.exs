@@ -72,7 +72,10 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
   def ack_last_seen_event(context, last_seen) do
     %{conn: conn, schema: schema} = context
 
-    Storage.ack_last_seen_event(conn, @all_stream, @subscription_name, last_seen, schema: schema)
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} =
+      Storage.Subscription.subscription(conn, @all_stream, @subscription_name, schema: schema)
+
+    Storage.ack_last_seen_event(conn, subscription_id, last_seen, schema: schema)
   end
 
   defp subscribe_to_stream(context) do

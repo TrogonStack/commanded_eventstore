@@ -5,6 +5,7 @@ defmodule EventStore.Subscriptions.Supervisor do
 
   use DynamicSupervisor
 
+  alias EventStore.Storage
   alias EventStore.Subscriptions
   alias EventStore.Subscriptions.Subscription
 
@@ -41,12 +42,12 @@ defmodule EventStore.Subscriptions.Supervisor do
     end
   end
 
-  def stop_subscription(event_store, stream_uuid, subscription_name, opts \\ []) do
+  def delete_subscription(event_store, conn, stream_uuid, subscription_name, opts \\ []) do
     name = registry_name(event_store, stream_uuid, subscription_name)
 
     case Registry.whereis_name(name) do
       :undefined ->
-        :ok
+        Storage.delete_subscription(conn, stream_uuid, subscription_name, opts)
 
       subscription ->
         # Shaped after `:proc_lib.stop/3`, which is what `GenServer.stop/3` runs, except that only
@@ -55,37 +56,41 @@ defmodule EventStore.Subscriptions.Supervisor do
         ref = Process.monitor(subscription)
         asked_at = System.monotonic_time(:millisecond)
 
-        case stop(subscription, opts) do
-          :ok ->
-            # Answering is not being gone: the reply is sent before `terminate/2`, where a
-            # subscription can still checkpoint. Waiting keeps a stale `last_seen` from landing on
-            # whatever row exists by the time it is written, and the caller keeps one deadline for
-            # both halves of that.
-            receive do
-              {:DOWN, ^ref, :process, ^subscription, _reason} -> :ok
-            after
-              remaining(opts, asked_at) ->
-                Process.demonitor(ref, [:flush])
+        case delete(subscription, opts) do
+          :gone ->
+            Process.demonitor(ref, [:flush])
 
-                exit({:timeout, {__MODULE__, :stop_subscription, [subscription]}})
-            end
+            Storage.delete_subscription(conn, stream_uuid, subscription_name, opts)
 
           {:error, _error} = error ->
             Process.demonitor(ref, [:flush])
 
             error
+
+          reply ->
+            # Answering is not being gone: the reply is sent before `terminate/2` has run, and a
+            # caller that subscribes again under the same name races a process that still holds it.
+            # One deadline covers being answered and being gone.
+            receive do
+              {:DOWN, ^ref, :process, ^subscription, _reason} -> reply
+            after
+              remaining(opts, asked_at) ->
+                Process.demonitor(ref, [:flush])
+
+                exit({:timeout, {__MODULE__, :delete_subscription, [subscription]}})
+            end
         end
     end
   end
 
-  # A subscription that goes down while being asked to stop leaves nothing to stop. Its last
-  # subscriber has most likely just unsubscribed, which answers before the subscription it stops
-  # has terminated. A timeout is not that: it says the subscription may still be writing, so
-  # reading it as nothing left to stop would delete a row out from under a checkpoint.
-  defp stop(subscription, opts) do
-    Subscription.stop(subscription, opts)
+  # A subscription that goes down while being asked to delete itself has not deleted its row, and
+  # has given up the name that was keeping anything else from claiming it, which leaves the row to
+  # delete from here. A timeout is not that: it says the subscription may still be writing, so
+  # deleting the row from here would delete it out from under that write.
+  defp delete(subscription, opts) do
+    Subscription.delete(subscription, opts)
   catch
-    :exit, {reason, {GenServer, :call, _args}} when reason != :timeout -> :ok
+    :exit, {reason, {GenServer, :call, _args}} when reason != :timeout -> :gone
   end
 
   defp remaining(opts, asked_at) do

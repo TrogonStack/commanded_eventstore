@@ -1,7 +1,6 @@
 defmodule EventStore.Subscriptions do
   @moduledoc false
 
-  alias EventStore.Storage
   alias EventStore.Subscriptions.Subscription
   alias EventStore.Subscriptions.Supervisor, as: SubscriptionsSupervisor
 
@@ -22,8 +21,9 @@ defmodule EventStore.Subscriptions do
   end
 
   defdelegate unsubscribe_from_stream(event_store, stream_uuid, name), to: SubscriptionsSupervisor
-  defdelegate stop_subscription(event_store, stream_uuid, name, opts), to: SubscriptionsSupervisor
-  defdelegate delete_subscription(conn, stream_uuid, subscription_name, opts), to: Storage
+
+  defdelegate delete_subscription(event_store, conn, stream_uuid, name, opts),
+    to: SubscriptionsSupervisor
 
   @doc """
   Get the delay between subscription retry attempts, in milliseconds, from the
