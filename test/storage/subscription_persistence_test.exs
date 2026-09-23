@@ -69,6 +69,70 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     verify_subscription(subscription, 1)
   end
 
+  test "ack last seen event when the subscription no longer exists", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    :ok = delete_subscription(context)
+
+    assert {:error, :subscription_not_found} =
+             Storage.ack_last_seen_event(conn, subscription_id, 1, schema: schema)
+  end
+
+  test "ack last seen event only moves the subscription it names", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: acked}} = subscribe_to_stream(context)
+
+    {:ok, %Storage.Subscription{subscription_id: untouched}} =
+      Storage.subscribe_to_stream(conn, @all_stream, "another_subscription", schema: schema)
+
+    :ok = Storage.ack_last_seen_event(conn, acked, 1, schema: schema)
+
+    assert {:ok, %Storage.Subscription{subscription_id: ^acked, last_seen: 1}} =
+             Storage.Subscription.subscription(conn, @all_stream, @subscription_name,
+               schema: schema
+             )
+
+    assert {:ok, %Storage.Subscription{subscription_id: ^untouched, last_seen: nil}} =
+             Storage.Subscription.subscription(conn, @all_stream, "another_subscription",
+               schema: schema
+             )
+  end
+
+  test "ack last seen event when the name now belongs to a different subscription", context do
+    %{conn: conn, schema: schema} = context
+
+    {:ok, %Storage.Subscription{subscription_id: deleted}} = subscribe_to_stream(context)
+
+    :ok = delete_subscription(context)
+
+    {:ok, %Storage.Subscription{subscription_id: recreated}} = subscribe_to_stream(context)
+
+    assert recreated != deleted
+
+    assert {:error, :subscription_not_found} =
+             Storage.ack_last_seen_event(conn, deleted, 1, schema: schema)
+
+    # The stream and name are the same as the deleted subscription's, so anything keyed by those
+    # would have credited this subscription with a position it never acknowledged.
+    assert {:ok, %Storage.Subscription{subscription_id: ^recreated, last_seen: nil}} =
+             Storage.Subscription.subscription(conn, @all_stream, @subscription_name,
+               schema: schema
+             )
+  end
+
+  test "ack last seen event reports a storage failure as itself, not as a missing subscription",
+       context do
+    %{conn: conn} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    assert {:error, %Postgrex.Error{}} =
+             Storage.ack_last_seen_event(conn, subscription_id, 1, schema: "no_such_schema")
+  end
+
   def ack_last_seen_event(context, last_seen) do
     %{conn: conn, schema: schema} = context
 

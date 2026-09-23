@@ -1171,6 +1171,85 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should keep the subscription and its row when the delete fails in storage",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription =
+        start_unconnected_subscription(context, stream_uuid, schema: "no_such_schema")
+
+      assert {:error, %Postgrex.Error{}} = Subscription.delete(subscription)
+
+      # Failing to delete the row is not having deleted it, so the subscription that owns it has
+      # to still be there to go on writing to it.
+      assert Process.alive?(subscription)
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should delete the row a subscription gave up on without deleting",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+
+      # Suspended so the delete is still queued when the subscription dies, which is what leaves
+      # the row behind with nothing holding the name any more.
+      :ok = :sys.suspend(subscription)
+
+      deleting =
+        Task.async(fn -> EventStore.delete_subscription(stream_uuid, subscription_name) end)
+
+      assert_enqueued(subscription, 1)
+
+      Process.exit(subscription, :kill)
+
+      assert :ok = Task.await(deleting)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should wait without a deadline for a checkpoint when asked to", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      block_checkpoint()
+
+      Process.exit(subscriber, :kill)
+
+      assert_receive {:checkpointing, ^subscription}
+
+      deleting =
+        Task.async(fn ->
+          EventStore.delete_subscription(stream_uuid, subscription_name, timeout: :infinity)
+        end)
+
+      # Longer than the five seconds a `GenServer.call/2` waits by default, so a deadline that
+      # was not carried through as `:infinity` would have given up by now.
+      refute Task.yield(deleting, 6_000)
+
+      send(subscription, :release_checkpoint)
+
+      assert :ok = Task.await(deleting)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
     test "should not disconnect a subscriber that connects while the delete is in flight",
          %{subscription_name: subscription_name} = context do
       stream_uuid = UUID.uuid4()
@@ -1387,7 +1466,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
 
   # A started subscription with no subscriber connected to it yet, which is the only way a live
   # subscription has none: losing its last subscriber shuts it down.
-  defp start_unconnected_subscription(context, stream_uuid) do
+  defp start_unconnected_subscription(context, stream_uuid, overrides \\ []) do
     %{
       conn: conn,
       schema: schema,
@@ -1401,7 +1480,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       Subscriptions.Supervisor.start_subscription(
         event_store: @event_store,
         conn: conn,
-        schema: schema,
+        schema: Keyword.get(overrides, :schema, schema),
         serializer: serializer,
         correlation_id_type: correlation_id_type,
         causation_id_type: causation_id_type,

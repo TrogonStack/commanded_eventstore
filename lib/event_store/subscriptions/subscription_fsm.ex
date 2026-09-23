@@ -211,8 +211,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   def checkpoint(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
   # A subscription creates its own row when it subscribes, so deleting that row is the
-  # subscription's to do as well. Nothing can remain pending afterwards, because a checkpoint has
-  # no row left to be written to.
+  # subscription's to do as well.
   def delete(%__MODULE__{data: %SubscriptionState{} = data} = fsm) do
     %SubscriptionState{
       conn: conn,
@@ -228,7 +227,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         timeout: query_timeout
       )
 
-    {reply, %__MODULE__{fsm | data: %SubscriptionState{data | checkpoints_pending: 0}}}
+    case reply do
+      # Nothing can remain pending once the row is gone, because a checkpoint has nothing left to
+      # be written to. A row that is still there keeps whatever was pending for it.
+      :ok ->
+        {:ok, %__MODULE__{fsm | data: %SubscriptionState{data | checkpoints_pending: 0}}}
+
+      {:error, _error} ->
+        {reply, fsm}
+    end
   end
 
   # Notify events when subscribed
