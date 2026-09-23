@@ -1434,6 +1434,92 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, [%Storage.Subscription{subscription_id: ^taken_over, last_seen: ^last_seen}]} =
                Storage.subscriptions(@conn, schema: schema)
     end
+
+    test "should leave the subscription that took over its name every event to deliver", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      {:ok, successor} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^successor}
+
+      # Every other test here reads the position out of the row. This one reads it the way a
+      # subscriber does, because a position nobody reads back is not the thing that was at stake.
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+    end
+
+    test "should leave the other subscriptions running when it stops", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+      sibling_stream_uuid = UUID.uuid4()
+      sibling_name = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      {:ok, sibling} =
+        EventStore.subscribe_to_stream(sibling_stream_uuid, sibling_name, self())
+
+      assert_receive {:subscribed, ^sibling}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      # Stopping over a row of its own is the subscription's own business, and a sibling that
+      # never shared that row has no reason to be restarted over it.
+      assert Process.alive?(sibling)
+
+      :ok = EventStore.append_to_stream(sibling_stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = sibling_events}
+      :ok = Subscription.ack(sibling, sibling_events)
+
+      Wait.until(fn ->
+        assert {:ok, [%Storage.Subscription{stream_uuid: ^sibling_stream_uuid, last_seen: 1}]} =
+                 Storage.subscriptions(@conn, schema: schema)
+      end)
+    end
   end
 
   # OTP 28 reports the `gen_server` hibernation loop where earlier releases
