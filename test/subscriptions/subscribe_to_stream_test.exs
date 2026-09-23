@@ -1547,6 +1547,30 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, [%Storage.Subscription{}]} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should leave no down message with the caller when it gives up waiting for an answer", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 0)
+               )
+
+      ref = Process.monitor(slow)
+
+      send(slow, :leave)
+
+      # One down message for the monitor this test set up. A second would be the one the delete
+      # gave up on without cleaning up, arriving in a caller that never asked to watch anything.
+      assert_receive {:DOWN, _ref, :process, ^slow, :shutdown}
+      refute_received {:DOWN, _ref, :process, ^slow, _reason}
+
+      Process.demonitor(ref, [:flush])
+    end
+
     test "should leave the other subscriptions running when it stops", %{
       subscription_name: subscription_name,
       schema: schema

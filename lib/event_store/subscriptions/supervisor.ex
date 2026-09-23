@@ -56,7 +56,7 @@ defmodule EventStore.Subscriptions.Supervisor do
         ref = Process.monitor(subscription)
         asked_at = System.monotonic_time(:millisecond)
 
-        case delete(subscription, opts) do
+        case delete(subscription, ref, opts) do
           :gone ->
             Process.demonitor(ref, [:flush])
 
@@ -87,10 +87,18 @@ defmodule EventStore.Subscriptions.Supervisor do
   # has given up the name that was keeping anything else from claiming it, which leaves the row to
   # delete from here. A timeout is not that: it says the subscription may still be writing, so
   # deleting the row from here would delete it out from under that write.
-  defp delete(subscription, opts) do
+  defp delete(subscription, ref, opts) do
     Subscription.delete(subscription, opts)
   catch
-    :exit, {reason, {GenServer, :call, _args}} when reason != :timeout -> :gone
+    :exit, {reason, {GenServer, :call, _args}} when reason != :timeout ->
+      :gone
+
+    :exit, reason ->
+      # Giving up here is still giving up on the monitor, which otherwise outlives the call and
+      # reaches whoever asked as a message they never set up to receive.
+      Process.demonitor(ref, [:flush])
+
+      exit(reason)
   end
 
   defp remaining(opts, asked_at) do
