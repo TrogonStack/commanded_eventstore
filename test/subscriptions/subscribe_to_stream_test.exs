@@ -11,7 +11,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     Wait
   }
 
-  alias EventStore.Subscriptions.Subscription
+  alias EventStore.Subscriptions.{SlowLeaver, Subscription}
   alias EventStore.Support.CollectingSubscriber
   alias TestEventStore, as: EventStore
 
@@ -880,8 +880,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     } do
       stream_uuid = UUID.uuid4()
 
-      name =
-        {Module.concat(@event_store, Subscriptions.Registry), {stream_uuid, subscription_name}}
+      name = registry_name(stream_uuid, subscription_name)
 
       subscriber = start_subscriber(stream_uuid, subscription_name)
 
@@ -1250,6 +1249,62 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should not return until the subscription that answered it has released its name", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      # Being answered says `terminate/2` has run, not that the name has been given up, which only
+      # happens once the process finishes exiting.
+      refute Process.alive?(slow)
+      assert :undefined == Registry.whereis_name(registry_name(stream_uuid, subscription_name))
+    end
+
+    test "should give up on a subscription that answered but will not go away", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert catch_exit(
+               EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 100)
+             ) == {:timeout, {Subscriptions.Supervisor, :delete_subscription, [slow]}}
+    end
+
+    test "should count the wait for an answer against the deadline it was given", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      start_slow_leaver(stream_uuid, subscription_name, answer_after: 300, leaving_for: 400)
+
+      # Being answered with 200ms of an 500ms deadline left is not 500ms to wait for the name, and
+      # reporting a delete that has not released the name is the failure being avoided.
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 500)
+               )
+    end
+
+    test "should wait out a subscription that answered when given no deadline", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert :ok =
+               EventStore.delete_subscription(stream_uuid, subscription_name, timeout: :infinity)
+
+      refute Process.alive?(slow)
+      assert :undefined == Registry.whereis_name(registry_name(stream_uuid, subscription_name))
+    end
+
     test "should not disconnect a subscriber that connects while the delete is in flight",
          %{subscription_name: subscription_name} = context do
       stream_uuid = UUID.uuid4()
@@ -1462,6 +1517,24 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     Wait.until(fn ->
       assert {:message_queue_len, ^count} = Process.info(pid, :message_queue_len)
     end)
+  end
+
+  # Holds the registered name, answers a delete, and only then takes its time going away, which is
+  # the gap between being answered and being gone.
+  defp start_slow_leaver(stream_uuid, subscription_name, opts \\ []) do
+    name = registry_name(stream_uuid, subscription_name)
+
+    opts = Keyword.merge([name: {:via, Registry, name}, leaving_for: 500], opts)
+
+    pid = start_supervised!({SlowLeaver, opts})
+
+    assert pid == Registry.whereis_name(name)
+
+    pid
+  end
+
+  defp registry_name(stream_uuid, subscription_name) do
+    {Module.concat([@event_store, Subscriptions.Registry]), {stream_uuid, subscription_name}}
   end
 
   # A started subscription with no subscriber connected to it yet, which is the only way a live
