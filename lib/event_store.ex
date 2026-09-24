@@ -581,10 +581,7 @@ defmodule EventStore do
             name = name(opts)
             {conn, opts} = parse_opts(opts)
 
-            with :ok <-
-                   Subscriptions.stop_subscription(name, stream_uuid, subscription_name, opts) do
-              Subscriptions.delete_subscription(conn, stream_uuid, subscription_name, opts)
-            end
+            Subscriptions.delete_subscription(name, conn, stream_uuid, subscription_name, opts)
           end
         )
       end

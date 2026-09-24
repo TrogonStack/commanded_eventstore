@@ -74,8 +74,7 @@ defmodule EventStore.Storage do
   @doc """
   Acknowledge receipt of an event by its number, for a single subscription.
   """
-  defdelegate ack_last_seen_event(conn, stream_uuid, subscription_name, last_seen, opts),
-    to: Subscription
+  defdelegate ack_last_seen_event(conn, subscription_id, last_seen, opts), to: Subscription
 
   @doc """
   Delete an existing named subscription to a stream.

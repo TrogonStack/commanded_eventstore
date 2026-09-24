@@ -41,8 +41,8 @@ defmodule EventStore.Storage.Subscription do
     end
   end
 
-  def ack_last_seen_event(conn, stream_uuid, subscription_name, last_seen, opts) do
-    Subscription.Ack.execute(conn, stream_uuid, subscription_name, last_seen, opts)
+  def ack_last_seen_event(conn, subscription_id, last_seen, opts) do
+    Subscription.Ack.execute(conn, subscription_id, last_seen, opts)
   end
 
   def delete_subscription(conn, stream_uuid, subscription_name, opts),
@@ -136,18 +136,28 @@ defmodule EventStore.Storage.Subscription do
   defmodule Ack do
     @moduledoc false
 
-    def execute(conn, stream_uuid, subscription_name, last_seen, opts) do
+    def execute(conn, subscription_id, last_seen, opts) do
       {schema, opts} = Keyword.pop(opts, :schema)
 
       query = Statements.subscription_ack(schema)
 
-      case Postgrex.query(conn, query, [stream_uuid, subscription_name, last_seen], opts) do
+      case Postgrex.query(conn, query, [subscription_id, last_seen], opts) do
+        # Naming the subscription by its identifier, rather than by the stream and name a later
+        # subscription can reuse, is what keeps this from writing a checkpoint onto whichever row
+        # holds that name now.
+        {:ok, %Postgrex.Result{num_rows: 0}} ->
+          Logger.warning(
+            "Failed to ack last seen event for subscription #{subscription_id} because it no longer exists"
+          )
+
+          {:error, :subscription_not_found}
+
         {:ok, _result} ->
           :ok
 
         {:error, error} = reply ->
           Logger.warning(
-            "Failed to ack last seen event on stream \"#{stream_uuid}\" named \"#{subscription_name}\" due to: " <>
+            "Failed to ack last seen event for subscription #{subscription_id} due to: " <>
               inspect(error)
           )
 

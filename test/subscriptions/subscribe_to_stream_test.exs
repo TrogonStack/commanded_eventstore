@@ -11,7 +11,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     Wait
   }
 
-  alias EventStore.Subscriptions.Subscription
+  alias EventStore.Subscriptions.{SlowLeaver, Subscription}
   alias EventStore.Support.CollectingSubscriber
   alias TestEventStore, as: EventStore
 
@@ -880,8 +880,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     } do
       stream_uuid = UUID.uuid4()
 
-      name =
-        {Module.concat(@event_store, Subscriptions.Registry), {stream_uuid, subscription_name}}
+      name = registry_name(stream_uuid, subscription_name)
 
       subscriber = start_subscriber(stream_uuid, subscription_name)
 
@@ -1171,6 +1170,141 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
     end
 
+    test "should keep the subscription and its row when the delete fails in storage",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription =
+        start_unconnected_subscription(context, stream_uuid, schema: "no_such_schema")
+
+      assert {:error, %Postgrex.Error{}} = Subscription.delete(subscription)
+
+      # Failing to delete the row is not having deleted it, so the subscription that owns it has
+      # to still be there to go on writing to it.
+      assert Process.alive?(subscription)
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should delete the row a subscription gave up on without deleting",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+
+      # Suspended so the delete is still queued when the subscription dies, which is what leaves
+      # the row behind with nothing holding the name any more.
+      :ok = :sys.suspend(subscription)
+
+      deleting =
+        Task.async(fn -> EventStore.delete_subscription(stream_uuid, subscription_name) end)
+
+      assert_enqueued(subscription, 1)
+
+      Process.exit(subscription, :kill)
+
+      assert :ok = Task.await(deleting)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should wait without a deadline for a checkpoint when asked to", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      subscriber = start_subscriber(stream_uuid, subscription_name)
+
+      assert_receive {:subscriber, ^subscriber, subscription}
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+      :ok = Subscription.ack(subscription, 1, subscriber)
+
+      block_checkpoint()
+
+      Process.exit(subscriber, :kill)
+
+      assert_receive {:checkpointing, ^subscription}
+
+      deleting =
+        Task.async(fn ->
+          EventStore.delete_subscription(stream_uuid, subscription_name, timeout: :infinity)
+        end)
+
+      # Longer than the five seconds a `GenServer.call/2` waits by default, so a deadline that
+      # was not carried through as `:infinity` would have given up by now.
+      refute Task.yield(deleting, 6_000)
+
+      send(subscription, :release_checkpoint)
+
+      assert :ok = Task.await(deleting)
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should not return until the subscription that answered it has released its name", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      # Being answered says `terminate/2` has run, not that the name has been given up, which only
+      # happens once the process finishes exiting.
+      refute Process.alive?(slow)
+      assert :undefined == Registry.whereis_name(registry_name(stream_uuid, subscription_name))
+    end
+
+    test "should give up on a subscription that answered but will not go away", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert catch_exit(
+               EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 100)
+             ) == {:timeout, {Subscriptions.Supervisor, :delete_subscription, [slow]}}
+    end
+
+    test "should count the wait for an answer against the deadline it was given", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      start_slow_leaver(stream_uuid, subscription_name, answer_after: 300, leaving_for: 400)
+
+      # Being answered with 200ms of an 500ms deadline left is not 500ms to wait for the name, and
+      # reporting a delete that has not released the name is the failure being avoided.
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 500)
+               )
+    end
+
+    test "should wait out a subscription that answered when given no deadline", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert :ok =
+               EventStore.delete_subscription(stream_uuid, subscription_name, timeout: :infinity)
+
+      refute Process.alive?(slow)
+      assert :undefined == Registry.whereis_name(registry_name(stream_uuid, subscription_name))
+    end
+
     test "should not disconnect a subscriber that connects while the delete is in flight",
          %{subscription_name: subscription_name} = context do
       stream_uuid = UUID.uuid4()
@@ -1215,6 +1349,274 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
         {:ok, ^subscription} -> assert Process.alive?(subscription)
         {:exit, _reason} -> refute Process.alive?(subscription)
       end
+    end
+
+    test "should delete its own row, rather than leave it to whoever asked",
+         %{subscription_name: subscription_name, schema: schema} = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      subscription = start_unconnected_subscription(context, stream_uuid)
+
+      assert {:ok, [_subscription]} = Storage.subscriptions(@conn, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      # Asking the subscription directly, with nothing else able to delete on its behalf, is what
+      # shows the row going away while the subscription still holds its registered name.
+      assert :ok = Subscription.delete(subscription)
+
+      assert {:ok, []} = Storage.subscriptions(@conn, schema: schema)
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :shutdown}
+    end
+
+    test "should stop when its checkpoint reaches no row of its own", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      ref = Process.monitor(subscription)
+
+      # Deleting the row behind the subscription's back is what a delete racing its name does.
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+    end
+
+    test "should not write its checkpoint onto the subscription that took over its name", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      {:ok, %Storage.Subscription{subscription_id: taken_over, last_seen: last_seen}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      # A checkpoint names the row it belongs to, so the subscription holding the name now keeps
+      # the position it was created with instead of inheriting one it never acknowledged.
+      assert {:ok, [%Storage.Subscription{subscription_id: ^taken_over, last_seen: ^last_seen}]} =
+               Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should leave the subscription that took over its name every event to deliver", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      {:ok, successor} = EventStore.subscribe_to_stream(stream_uuid, subscription_name, self())
+
+      assert_receive {:subscribed, ^successor}
+
+      # Every other test here reads the position out of the row. This one reads it the way a
+      # subscriber does, because a position nobody reads back is not the thing that was at stake.
+      assert_receive {:events, [%RecordedEvent{event_number: 1}]}
+    end
+
+    test "should leave no down message with the caller when it deletes a live subscription",
+         %{
+           subscription_name: subscription_name,
+           schema: schema
+         } = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      _subscription = start_unconnected_subscription(context, stream_uuid)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      # The delete watches the subscription from whichever process asked for it, so a monitor it
+      # does not clean up becomes an unexpected message in a caller that is a `GenServer`.
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should leave no down message with the caller when there is nothing running", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      assert :ok = EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should leave no down message with the caller when the delete fails in storage",
+         %{
+           subscription_name: subscription_name,
+           schema: schema
+         } = context do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      _subscription =
+        start_unconnected_subscription(context, stream_uuid, schema: "no_such_schema")
+
+      assert {:error, %Postgrex.Error{}} =
+               EventStore.delete_subscription(stream_uuid, subscription_name)
+
+      refute_received {:DOWN, _ref, :process, _pid, _reason}
+    end
+
+    test "should keep the subscription and its row when it is given no time at all", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, %Storage.Subscription{}} =
+        Storage.subscribe_to_stream(@conn, stream_uuid, subscription_name, nil, schema: schema)
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 0)
+               )
+
+      # Giving up is not being gone: the subscription may still be writing, and deleting its row
+      # from here would delete it out from under that write.
+      assert Process.alive?(slow)
+      assert {:ok, [%Storage.Subscription{}]} = Storage.subscriptions(@conn, schema: schema)
+    end
+
+    test "should leave no down message with the caller when it gives up waiting for an answer", %{
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      slow = start_slow_leaver(stream_uuid, subscription_name)
+
+      assert {:timeout, _where} =
+               catch_exit(
+                 EventStore.delete_subscription(stream_uuid, subscription_name, timeout: 0)
+               )
+
+      ref = Process.monitor(slow)
+
+      send(slow, :leave)
+
+      # One down message for the monitor this test set up. A second would be the one the delete
+      # gave up on without cleaning up, arriving in a caller that never asked to watch anything.
+      assert_receive {:DOWN, _ref, :process, ^slow, :shutdown}
+      refute_received {:DOWN, _ref, :process, ^slow, _reason}
+
+      Process.demonitor(ref, [:flush])
+    end
+
+    test "should leave the other subscriptions running when it stops", %{
+      subscription_name: subscription_name,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+      sibling_stream_uuid = UUID.uuid4()
+      sibling_name = UUID.uuid4()
+
+      {:ok, subscription} =
+        EventStore.subscribe_to_stream(stream_uuid, subscription_name, self(),
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      {:ok, sibling} =
+        EventStore.subscribe_to_stream(sibling_stream_uuid, sibling_name, self())
+
+      assert_receive {:subscribed, ^sibling}
+
+      :ok = EventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = events}
+      :ok = Subscription.ack(subscription, events)
+
+      :ok = Storage.delete_subscription(@conn, stream_uuid, subscription_name, schema: schema)
+
+      ref = Process.monitor(subscription)
+
+      send(subscription, :checkpoint)
+
+      assert_receive {:DOWN, ^ref, :process, ^subscription, :subscription_not_found}
+
+      # Stopping over a row of its own is the subscription's own business, and a sibling that
+      # never shared that row has no reason to be restarted over it.
+      assert Process.alive?(sibling)
+
+      :ok = EventStore.append_to_stream(sibling_stream_uuid, 0, EventFactory.create_events(1))
+
+      assert_receive {:events, [%RecordedEvent{event_number: 1}] = sibling_events}
+      :ok = Subscription.ack(sibling, sibling_events)
+
+      Wait.until(fn ->
+        assert {:ok, [%Storage.Subscription{stream_uuid: ^sibling_stream_uuid, last_seen: 1}]} =
+                 Storage.subscriptions(@conn, schema: schema)
+      end)
     end
   end
 
@@ -1301,9 +1703,27 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     end)
   end
 
+  # Holds the registered name, answers a delete, and only then takes its time going away, which is
+  # the gap between being answered and being gone.
+  defp start_slow_leaver(stream_uuid, subscription_name, opts \\ []) do
+    name = registry_name(stream_uuid, subscription_name)
+
+    opts = Keyword.merge([name: {:via, Registry, name}, leaving_for: 500], opts)
+
+    pid = start_supervised!({SlowLeaver, opts})
+
+    assert pid == Registry.whereis_name(name)
+
+    pid
+  end
+
+  defp registry_name(stream_uuid, subscription_name) do
+    {Module.concat([@event_store, Subscriptions.Registry]), {stream_uuid, subscription_name}}
+  end
+
   # A started subscription with no subscriber connected to it yet, which is the only way a live
   # subscription has none: losing its last subscriber shuts it down.
-  defp start_unconnected_subscription(context, stream_uuid) do
+  defp start_unconnected_subscription(context, stream_uuid, overrides \\ []) do
     %{
       conn: conn,
       schema: schema,
@@ -1317,7 +1737,7 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
       Subscriptions.Supervisor.start_subscription(
         event_store: @event_store,
         conn: conn,
-        schema: schema,
+        schema: Keyword.get(overrides, :schema, schema),
         serializer: serializer,
         correlation_id_type: correlation_id_type,
         causation_id_type: causation_id_type,

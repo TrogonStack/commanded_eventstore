@@ -89,14 +89,14 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @doc """
-  Stop the subscription, unless a subscriber is still connected to it.
+  Delete the subscription, unless a subscriber is still connected to it.
 
   Accepts a `:timeout`, in milliseconds or `:infinity`. Whatever the subscription is busy with is
   storage work bounded by its own `:timeout`, so anything shorter than that gives up on a write
   that is still going to land.
   """
-  def stop(subscription, opts \\ []) do
-    GenServer.call(subscription, :stop, Keyword.get(opts, :timeout, @default_timeout))
+  def delete(subscription, opts \\ []) do
+    GenServer.call(subscription, :delete, Keyword.get(opts, :timeout, @default_timeout))
   end
 
   @doc false
@@ -188,6 +188,13 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @impl GenServer
+  def handle_info({:checkpoint_failed, reason}, %Subscription{} = state) do
+    Logger.warning(describe(state) <> " could not persist its checkpoint: #{inspect(reason)}")
+
+    {:stop, reason, state}
+  end
+
+  @impl GenServer
   def handle_info({:EXIT, _from, reason}, %Subscription{} = state) do
     {:stop, reason, state}
   end
@@ -260,14 +267,27 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @impl GenServer
-  def handle_call(:stop, _from, %Subscription{} = state) do
+  def handle_call(:delete, _from, %Subscription{} = state) do
     %Subscription{
-      subscription: %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}}
+      subscription:
+        %SubscriptionFsm{data: %SubscriptionState{subscribers: subscribers}} = subscription
     } = state
 
     case map_size(subscribers) do
-      0 -> {:stop, :shutdown, :ok, state}
-      _ -> {:reply, {:error, :subscribers_connected}, state}
+      0 ->
+        # Holding the registered name for as long as this call runs is what keeps a replacement
+        # subscription from claiming the name and reading the row being deleted.
+        {reply, subscription} = SubscriptionFsm.delete(subscription)
+
+        state = %Subscription{state | subscription: subscription}
+
+        case reply do
+          :ok -> {:stop, :shutdown, :ok, state}
+          {:error, _error} -> {:reply, reply, state}
+        end
+
+      _ ->
+        {:reply, {:error, :subscribers_connected}, state}
     end
   end
 
