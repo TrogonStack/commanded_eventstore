@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.4.9](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.8...v1.4.9) (2026-09-24)
+
+
+### Bug Fixes
+
+* **notifications:** Recover from a dead listener connection ([#11](https://github.com/TrogonStack/commanded_eventstore/issues/11)) ([a1268b5](https://github.com/TrogonStack/commanded_eventstore/commit/a1268b5441a6eb08f5b2cf62a9c632f2652a227a))
+* **subscriptions:** Keep catching up when the checkpoint timer fires ([#10](https://github.com/TrogonStack/commanded_eventstore/issues/10)) ([23cbf8e](https://github.com/TrogonStack/commanded_eventstore/commit/23cbf8e7d5e841a50ce0ae674cd37f46de6b2799))
+* **subscriptions:** Stop a deleted subscription from silently skipping its successor's events ([#21](https://github.com/TrogonStack/commanded_eventstore/issues/21)) ([10c61fc](https://github.com/TrogonStack/commanded_eventstore/commit/10c61fced14b72eff7c257235644e71e955c6ece))
+* **subscriptions:** Stop a subscription delete from disconnecting its subscribers ([#20](https://github.com/TrogonStack/commanded_eventstore/issues/20)) ([43ac0b7](https://github.com/TrogonStack/commanded_eventstore/commit/43ac0b7b4884f56317ac0174fbd85cb33f8cb04b))
+
+
+### Miscellaneous
+
+* **ci:** Automate releases with release-please ([#7](https://github.com/TrogonStack/commanded_eventstore/issues/7)) ([051c22d](https://github.com/TrogonStack/commanded_eventstore/commit/051c22d7cb74b2c46d10607755ba4c92261017a7))
+* **ci:** Restrict commit types to chore, feat and fix ([#19](https://github.com/TrogonStack/commanded_eventstore/issues/19)) ([fb651e2](https://github.com/TrogonStack/commanded_eventstore/commit/fb651e2e6d8e4102858c044a02cee8600d3d03ff))
+* Claim copyright for the work done in this fork ([#8](https://github.com/TrogonStack/commanded_eventstore/issues/8)) ([2dcb046](https://github.com/TrogonStack/commanded_eventstore/commit/2dcb0461622cfcf5d9bd2bbebc5f0dded248907b))
+* Clear shutdown noise and compiler warnings ([#12](https://github.com/TrogonStack/commanded_eventstore/issues/12)) ([01aea6a](https://github.com/TrogonStack/commanded_eventstore/commit/01aea6a2b477a7c1b90e097d0010cf95ac08a64b))
+* Point self-referential links at this fork ([#6](https://github.com/TrogonStack/commanded_eventstore/issues/6)) ([44efa14](https://github.com/TrogonStack/commanded_eventstore/commit/44efa14db6dd4fb6cc0656337c4c8acf4a688480))
+* Support only the last three Elixir and OTP releases ([#16](https://github.com/TrogonStack/commanded_eventstore/issues/16)) ([9215862](https://github.com/TrogonStack/commanded_eventstore/commit/92158627219f4279119ca5f316ec4896a6bbdf81))
+* Sync with upstream commanded/eventstore ([f6a1fc6](https://github.com/TrogonStack/commanded_eventstore/commit/f6a1fc66754aa748cacdc808dd99ab1db646c1d8))
+* Sync with upstream commanded/eventstore ([3532706](https://github.com/TrogonStack/commanded_eventstore/commit/3532706e0888017b53b480aeaa91a999d1076504))
+* **test:** Stop the test environment from hiding compiler warnings ([#18](https://github.com/TrogonStack/commanded_eventstore/issues/18)) ([549dbe0](https://github.com/TrogonStack/commanded_eventstore/commit/549dbe030088767a0460d1524474ee99e685d0f3))
+
 ## v1.4.8
 
 ### Bug fixes
