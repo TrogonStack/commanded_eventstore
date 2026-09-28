@@ -115,6 +115,7 @@ defmodule EventStore.Config do
     :backoff_max,
     :backoff_min,
     :backoff_type,
+    :checkout_retries,
     :configure,
     :connect_timeout,
     :connection_listeners,
@@ -124,6 +125,8 @@ defmodule EventStore.Config do
     :handshake_timeout,
     :hostname,
     :idle_interval,
+    :idle_limit,
+    :max_lifetime,
     :max_restarts,
     :max_seconds,
     :parameters,
@@ -148,8 +151,12 @@ defmodule EventStore.Config do
     :username
   ]
 
+  # Only the main pool may recycle connections, every other connection holds
+  # state tied to its lifetime (advisory locks, LISTEN registrations).
   def default_postgrex_opts(config) do
-    Keyword.take(config, @postgrex_connection_opts)
+    config
+    |> Keyword.take(@postgrex_connection_opts)
+    |> Keyword.delete(:max_lifetime)
   end
 
   def postgrex_opts(config, name) do
