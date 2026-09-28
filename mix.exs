@@ -38,6 +38,7 @@ defmodule EventStore.Mixfile do
 
   defp deps do
     [
+      {:db_connection, "~> 2.10"},
       {:gen_stage, "~> 1.2"},
       {:postgrex, "~> 0.22"},
       {:telemetry, "~> 1.0"},
