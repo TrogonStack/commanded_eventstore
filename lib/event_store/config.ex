@@ -115,6 +115,7 @@ defmodule EventStore.Config do
     :backoff_max,
     :backoff_min,
     :backoff_type,
+    :checkout_retries,
     :configure,
     :connect_timeout,
     :connection_listeners,
@@ -124,6 +125,8 @@ defmodule EventStore.Config do
     :handshake_timeout,
     :hostname,
     :idle_interval,
+    :idle_limit,
+    :max_lifetime,
     :max_restarts,
     :max_seconds,
     :parameters,
@@ -166,8 +169,7 @@ defmodule EventStore.Config do
 
   def postgrex_notifications_opts(config, name) do
     config
-    |> session_mode_pool_config()
-    |> default_postgrex_opts()
+    |> session_mode_postgrex_opts()
     |> Keyword.put(:auto_reconnect, true)
     |> Keyword.put(:backoff_type, :exp)
     |> Keyword.put(:pool_size, 1)
@@ -183,10 +185,18 @@ defmodule EventStore.Config do
   """
   def advisory_locks_postgrex_opts(config) do
     config
-    |> session_mode_pool_config()
-    |> default_postgrex_opts()
+    |> session_mode_postgrex_opts()
     |> Keyword.put(:backoff_type, :stop)
     |> Keyword.put(:pool_size, 1)
+  end
+
+  # Session mode connections hold state tied to their lifetime (advisory locks,
+  # LISTEN registrations), so they must never be recycled.
+  defp session_mode_postgrex_opts(config) do
+    config
+    |> session_mode_pool_config()
+    |> default_postgrex_opts()
+    |> Keyword.delete(:max_lifetime)
   end
 
   # Get the optional session mode pool to be used for persistent Postgres

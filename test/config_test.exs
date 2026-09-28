@@ -190,6 +190,39 @@ defmodule EventStore.ConfigTest do
            ]
   end
 
+  describe "connection pool options" do
+    setup do
+      config =
+        Config.parse(
+          url: "postgres://username:password@localhost/database",
+          checkout_retries: 5,
+          idle_limit: 2,
+          max_lifetime: 480_000..540_000
+        )
+
+      [config: config]
+    end
+
+    test "main pool accepts every option", %{config: config} do
+      opts = Config.postgrex_opts(config, :name)
+
+      assert opts[:checkout_retries] == 5
+      assert opts[:idle_limit] == 2
+      assert opts[:max_lifetime] == 480_000..540_000
+    end
+
+    test "session mode pools are never recycled", %{config: config} do
+      for opts <- [
+            Config.advisory_locks_postgrex_opts(config),
+            Config.postgrex_notifications_opts(config, :name)
+          ] do
+        assert opts[:checkout_retries] == 5
+        assert opts[:idle_limit] == 2
+        refute Keyword.has_key?(opts, :max_lifetime)
+      end
+    end
+  end
+
   test "parse url with query parameters" do
     config = [
       url: "postgres://username:password@localhost/database?ssl=true&pool_size=5&timeout=120000"
