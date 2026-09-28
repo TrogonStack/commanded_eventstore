@@ -211,8 +211,9 @@ defmodule EventStore.ConfigTest do
       assert opts[:max_lifetime] == 480_000..540_000
     end
 
-    test "session mode pools are never recycled", %{config: config} do
+    test "connections other than the main pool are never recycled", %{config: config} do
       for opts <- [
+            Config.default_postgrex_opts(config),
             Config.advisory_locks_postgrex_opts(config),
             Config.postgrex_notifications_opts(config, :name)
           ] do

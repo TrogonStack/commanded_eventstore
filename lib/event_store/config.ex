@@ -151,8 +151,12 @@ defmodule EventStore.Config do
     :username
   ]
 
+  # Only the main pool may recycle connections, every other connection holds
+  # state tied to its lifetime (advisory locks, LISTEN registrations).
   def default_postgrex_opts(config) do
-    Keyword.take(config, @postgrex_connection_opts)
+    config
+    |> Keyword.take(@postgrex_connection_opts)
+    |> Keyword.delete(:max_lifetime)
   end
 
   def postgrex_opts(config, name) do
@@ -169,7 +173,8 @@ defmodule EventStore.Config do
 
   def postgrex_notifications_opts(config, name) do
     config
-    |> session_mode_postgrex_opts()
+    |> session_mode_pool_config()
+    |> default_postgrex_opts()
     |> Keyword.put(:auto_reconnect, true)
     |> Keyword.put(:backoff_type, :exp)
     |> Keyword.put(:pool_size, 1)
@@ -185,18 +190,10 @@ defmodule EventStore.Config do
   """
   def advisory_locks_postgrex_opts(config) do
     config
-    |> session_mode_postgrex_opts()
-    |> Keyword.put(:backoff_type, :stop)
-    |> Keyword.put(:pool_size, 1)
-  end
-
-  # Session mode connections hold state tied to their lifetime (advisory locks,
-  # LISTEN registrations), so they must never be recycled.
-  defp session_mode_postgrex_opts(config) do
-    config
     |> session_mode_pool_config()
     |> default_postgrex_opts()
-    |> Keyword.delete(:max_lifetime)
+    |> Keyword.put(:backoff_type, :stop)
+    |> Keyword.put(:pool_size, 1)
   end
 
   # Get the optional session mode pool to be used for persistent Postgres
