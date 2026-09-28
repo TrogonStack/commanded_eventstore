@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.9...v1.5.0) (2026-09-28)
+
+
+### Features
+
+* **config:** Allow tuning pool pings, checkout retries and connection recycling ([#22](https://github.com/TrogonStack/commanded_eventstore/issues/22)) ([19072b4](https://github.com/TrogonStack/commanded_eventstore/commit/19072b4aec0da2eb6e1463f94ef3b9d1f3b427f9))
+
 ## [1.4.9](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.8...v1.4.9) (2026-09-24)
 
 
