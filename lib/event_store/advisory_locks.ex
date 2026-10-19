@@ -309,19 +309,12 @@ defmodule EventStore.AdvisoryLocks do
   # it queues requests while the pool is down and forgets those a dying pool received.
   defp with_pool(%State{conn: conn}, query) do
     case MonitoredServer.whereis(conn) do
-      nil ->
-        {:error, ConnectionError.exception("advisory lock connection pool is down")}
-
-      pool ->
-        try do
-          query.(pool)
-        catch
-          :exit, reason ->
-            {:error,
-             ConnectionError.exception(
-               "advisory lock connection pool exited: " <> inspect(reason)
-             )}
-        end
+      nil -> {:error, ConnectionError.exception("advisory lock connection pool is down")}
+      pool -> query.(pool)
     end
+  catch
+    :exit, reason ->
+      {:error,
+       ConnectionError.exception("advisory lock connection pool exited: " <> inspect(reason))}
   end
 end
