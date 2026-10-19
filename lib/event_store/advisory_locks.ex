@@ -13,7 +13,7 @@ defmodule EventStore.AdvisoryLocks do
 
   defmodule State do
     @moduledoc false
-    defstruct [:conn, :query_timeout, :ref, :schema, locks: %{}]
+    defstruct [:conn, :connection, :query_timeout, :ref, :schema, locks: %{}, released: []]
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
@@ -46,7 +46,26 @@ defmodule EventStore.AdvisoryLocks do
     def held_by?(%Lock{session: session}, %Session{} = current), do: session == current
   end
 
-  alias EventStore.AdvisoryLocks.{Lock, State}
+  defmodule Connection do
+    @moduledoc false
+
+    @type t :: %Connection{pid: pid(), monitor_ref: reference()}
+    defstruct [:pid, :monitor_ref]
+
+    def monitor(pid), do: %Connection{pid: pid, monitor_ref: Process.monitor(pid)}
+
+    def demonitor(nil), do: :ok
+
+    def demonitor(%Connection{monitor_ref: monitor_ref}),
+      do: Process.demonitor(monitor_ref, [:flush])
+
+    # Without a known connection any notice may be about the one holding the locks.
+    def current?(nil, _pid), do: true
+    def current?(%Connection{pid: pid}, pid), do: true
+    def current?(%Connection{}, _pid), do: false
+  end
+
+  alias EventStore.AdvisoryLocks.{Connection, Lock, State}
   alias EventStore.Storage
   alias EventStore.Storage.Session
 
@@ -132,20 +151,28 @@ defmodule EventStore.AdvisoryLocks do
 
     notify_lost_locks(locks, reason)
 
-    {:noreply, %State{state | locks: %{}}}
+    {:noreply, %State{state | connection: nil, locks: %{}, released: []}}
   end
 
   # The connection pool outlives its connections, so a reconnect replaces the
   # session that held the locks without the pool going down.
-  def handle_info({event, conn_pid}, %State{} = state)
-      when event in [:connected, :disconnected] and is_pid(conn_pid) do
-    {:noreply, release_locks_of_ended_sessions(state)}
-  end
+  def handle_info({:connected, conn_pid}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, connected(conn_pid, state)}
 
-  def handle_info({event, conn_pid, _tag}, %State{} = state)
-      when event in [:connected, :disconnected] and is_pid(conn_pid) do
-    {:noreply, release_locks_of_ended_sessions(state)}
-  end
+  def handle_info({:connected, conn_pid, _tag}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, connected(conn_pid, state)}
+
+  def handle_info({:disconnected, conn_pid}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, disconnected(conn_pid, :session_ended, state)}
+
+  def handle_info({:disconnected, conn_pid, _tag}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, disconnected(conn_pid, :session_ended, state)}
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, conn_pid, reason},
+        %State{connection: %Connection{monitor_ref: monitor_ref}} = state
+      ),
+      do: {:noreply, disconnected(conn_pid, reason, state)}
 
   # Release lock when the lock owner process terminates.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %State{} = state) do
@@ -173,11 +200,33 @@ defmodule EventStore.AdvisoryLocks do
     {:stop, reason, state}
   end
 
-  defp release_locks_of_ended_sessions(%State{locks: locks} = state) when map_size(locks) == 0,
+  defp connected(conn_pid, %State{connection: connection} = state) do
+    Connection.demonitor(connection)
+
+    verify_sessions(%State{state | connection: Connection.monitor(conn_pid)})
+  end
+
+  # A lock taken through the next connection can be recorded before this notice
+  # is handled, so it is released here too and only unlocked once verified.
+  defp disconnected(conn_pid, reason, %State{connection: connection} = state) do
+    if Connection.current?(connection, conn_pid) do
+      %State{locks: locks, released: released} = state
+
+      Connection.demonitor(connection)
+
+      notify_lost_locks(locks, reason)
+
+      %State{state | connection: nil, locks: %{}, released: Map.values(locks) ++ released}
+    else
+      state
+    end
+  end
+
+  defp verify_sessions(%State{locks: locks, released: []} = state) when map_size(locks) == 0,
     do: state
 
-  defp release_locks_of_ended_sessions(%State{} = state) do
-    %State{conn: conn, locks: locks, query_timeout: query_timeout} = state
+  defp verify_sessions(%State{} = state) do
+    %State{conn: conn, locks: locks, query_timeout: query_timeout, released: released} = state
 
     case Session.current(conn, timeout: query_timeout) do
       {:ok, %Session{} = session} ->
@@ -185,12 +234,15 @@ defmodule EventStore.AdvisoryLocks do
 
         notify_lost_locks(lost, :session_ended)
 
-        %State{state | locks: held}
+        for %Lock{key: key} = lock <- released, Lock.held_by?(lock, session) do
+          release_lock(key, state)
+        end
 
-      {:error, error} ->
-        notify_lost_locks(locks, error)
+        %State{state | locks: held, released: []}
 
-        %State{state | locks: %{}}
+      # A connection that cannot answer reports its own disconnect.
+      {:error, _error} ->
+        state
     end
   end
 
