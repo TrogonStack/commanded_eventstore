@@ -221,6 +221,20 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 1_000)
     end
+
+    test "should keep running when the lock pool monitor does not answer" do
+      locks = Process.whereis(@locks)
+
+      :ok = :sys.suspend(@conn)
+
+      try do
+        assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 10_000)
+      after
+        :ok = :sys.resume(@conn)
+      end
+
+      assert Process.whereis(@locks) == locks
+    end
   end
 
   describe "graceful shutdown" do
