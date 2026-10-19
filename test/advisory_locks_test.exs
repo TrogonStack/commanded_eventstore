@@ -79,6 +79,36 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert_receive({AdvisoryLocks, :lock_released, ^lock, :shutdown})
     end
+
+    test "should send `lock_released` message when the lock session ends and the connection reconnects",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      terminate_lock_session(conn)
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 5_000
+
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
+    test "should keep a lock acquired after the connection reconnects", %{conn: conn} do
+      {:ok, lost_lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      terminate_lock_session(conn)
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lost_lock, _reason}, 5_000
+
+      kept_lock =
+        Wait.until(fn ->
+          assert {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 2)
+
+          lock
+        end)
+
+      refute_receive {AdvisoryLocks, :lock_released, ^kept_lock, _reason}, 1_000
+    end
   end
 
   describe "graceful shutdown" do
@@ -204,6 +234,14 @@ defmodule EventStore.AdvisoryLocksTest do
     Wait.until(fn ->
       assert {:timeout, _} = catch_exit(:sys.get_state(locks, 10))
     end)
+  end
+
+  defp terminate_lock_session(conn) do
+    %Postgrex.Result{rows: [[backend_pid]]} =
+      Postgrex.query!(@conn, "SELECT pg_backend_pid()", [])
+
+    %Postgrex.Result{rows: [[true]]} =
+      Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
   end
 
   defp shutdown_database_connection do
