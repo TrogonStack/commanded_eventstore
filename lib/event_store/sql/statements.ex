@@ -24,6 +24,7 @@ defmodule EventStore.Sql.Statements do
         {:insert_snapshot, [:schema]},
         {:delete_snapshot, [:schema]},
         {:query_all_subscriptions, [:schema]},
+        {:query_session, []},
         {:query_snapshot, [:schema]},
         {:query_stream_info, [:schema]},
         {:query_stream_events_backward, [:schema]},

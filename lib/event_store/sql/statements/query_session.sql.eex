@@ -1,0 +1,3 @@
+SELECT pid, backend_start
+FROM pg_stat_activity
+WHERE pid = pg_backend_pid();

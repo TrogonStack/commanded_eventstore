@@ -58,7 +58,11 @@ defmodule EventStore.Supervisor do
 
         advisory_locks_name = Module.concat([name, AdvisoryLocks])
         advisory_locks_postgrex_conn = Module.concat([advisory_locks_name, Postgrex])
-        advisory_locks_config = Config.advisory_locks_postgrex_opts(config)
+
+        advisory_locks_config =
+          config
+          |> Config.advisory_locks_postgrex_opts()
+          |> Config.add_connection_listener(advisory_locks_name)
 
         subscriptions_name = Module.concat([name, Subscriptions.Supervisor])
         subscriptions_registry_name = Module.concat([name, Subscriptions.Registry])

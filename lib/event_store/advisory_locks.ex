@@ -7,6 +7,8 @@ defmodule EventStore.AdvisoryLocks do
 
   use GenServer
 
+  require Logger
+
   alias EventStore.MonitoredServer
 
   defmodule State do
@@ -25,22 +27,28 @@ defmodule EventStore.AdvisoryLocks do
   defmodule Lock do
     @moduledoc false
 
+    alias EventStore.Storage.Session
+
     @type t :: %Lock{
             key: non_neg_integer(),
             owner: pid(),
-            ref: reference()
+            ref: reference(),
+            session: Session.t()
           }
-    defstruct [:key, :owner, :ref]
+    defstruct [:key, :owner, :ref, :session]
 
-    def new(key, owner) do
-      %Lock{key: key, owner: owner, ref: make_ref()}
+    def new(key, owner, %Session{} = session) do
+      %Lock{key: key, owner: owner, ref: make_ref(), session: session}
     end
 
     def ref(%Lock{ref: ref}), do: ref
+
+    def held_by?(%Lock{session: session}, %Session{} = current), do: session == current
   end
 
   alias EventStore.AdvisoryLocks.{Lock, State}
   alias EventStore.Storage
+  alias EventStore.Storage.Session
 
   def start_link(opts) do
     {start_opts, advisory_locks_opts} =
@@ -101,9 +109,12 @@ defmodule EventStore.AdvisoryLocks do
   defp try_acquire_exclusive_lock(key, owner, timeout, %State{} = state) do
     %State{conn: conn, schema: schema} = state
 
-    with :ok <-
-           Storage.Lock.try_acquire_exclusive_lock(conn, key, schema: schema, timeout: timeout) do
-      {:ok, Lock.new(key, owner)}
+    with {:ok, %Session{} = session} <-
+           Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
+             schema: schema,
+             timeout: timeout
+           ) do
+      {:ok, Lock.new(key, owner, session)}
     end
   end
 
@@ -122,6 +133,18 @@ defmodule EventStore.AdvisoryLocks do
     notify_lost_locks(locks, reason)
 
     {:noreply, %State{state | locks: %{}}}
+  end
+
+  # The connection pool outlives its connections, so a reconnect replaces the
+  # session that held the locks without the pool going down.
+  def handle_info({event, conn_pid}, %State{} = state)
+      when event in [:connected, :disconnected] and is_pid(conn_pid) do
+    {:noreply, release_locks_of_ended_sessions(state)}
+  end
+
+  def handle_info({event, conn_pid, _tag}, %State{} = state)
+      when event in [:connected, :disconnected] and is_pid(conn_pid) do
+    {:noreply, release_locks_of_ended_sessions(state)}
   end
 
   # Release lock when the lock owner process terminates.
@@ -150,9 +173,39 @@ defmodule EventStore.AdvisoryLocks do
     {:stop, reason, state}
   end
 
+  defp release_locks_of_ended_sessions(%State{locks: locks} = state) when map_size(locks) == 0,
+    do: state
+
+  defp release_locks_of_ended_sessions(%State{} = state) do
+    %State{conn: conn, locks: locks, query_timeout: query_timeout} = state
+
+    case Session.current(conn, timeout: query_timeout) do
+      {:ok, %Session{} = session} ->
+        {held, lost} = Map.split_with(locks, fn {_ref, lock} -> Lock.held_by?(lock, session) end)
+
+        notify_lost_locks(lost, :session_ended)
+
+        %State{state | locks: held}
+
+      {:error, error} ->
+        notify_lost_locks(locks, error)
+
+        %State{state | locks: %{}}
+    end
+  end
+
+  defp notify_lost_locks(locks, _reason) when map_size(locks) == 0, do: :ok
+
   defp notify_lost_locks(locks, reason) do
-    for {_ref, %Lock{} = lock} <- locks do
+    Logger.warning(
+      "Lost #{map_size(locks)} advisory lock(s) held by this event store due to: " <>
+        inspect(reason)
+    )
+
+    for {owner_ref, %Lock{} = lock} <- locks do
       %Lock{owner: owner, ref: ref} = lock
+
+      Process.demonitor(owner_ref, [:flush])
 
       :ok = Process.send(owner, {__MODULE__, :lock_released, ref, reason}, [])
     end
