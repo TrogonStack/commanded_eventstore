@@ -193,6 +193,36 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "lock pool down" do
+    test "should reply to a lock query in flight when the lock pool goes down" do
+      reply_to = self()
+
+      holder = hold_only_connection()
+
+      try do
+        spawn(fn ->
+          send(reply_to, {:lock, AdvisoryLocks.try_advisory_lock(@locks, 1, 15_000)})
+        end)
+
+        wait_until_waiting_for_connection()
+
+        Process.exit(lock_pool_pid(), :kill)
+
+        assert_receive {:lock, {:error, _error}}, 1_000
+      after
+        send(holder, :release)
+      end
+    end
+
+    test "should not wait for the lock pool to restart" do
+      Process.exit(lock_pool_pid(), :kill)
+
+      Wait.until(fn -> assert is_nil(lock_pool_pid()) end)
+
+      assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 1_000)
+    end
+  end
+
   describe "graceful shutdown" do
     test "should complete an in-flight lock query before terminating" do
       reply_to = self()
@@ -364,7 +394,7 @@ defmodule EventStore.AdvisoryLocksTest do
   end
 
   defp hold_only_connection do
-    %{pid: conn} = Process.whereis(@conn) |> :sys.get_state()
+    conn = lock_pool_pid()
 
     reply_to = self()
 
@@ -458,8 +488,12 @@ defmodule EventStore.AdvisoryLocksTest do
   end
 
   defp shutdown_database_connection do
-    %{pid: pid} = Process.whereis(@conn) |> :sys.get_state()
+    EventStore.ProcessHelper.shutdown(lock_pool_pid())
+  end
 
-    EventStore.ProcessHelper.shutdown(pid)
+  defp lock_pool_pid do
+    %{pid: pid} = :sys.get_state(@conn)
+
+    pid
   end
 end
