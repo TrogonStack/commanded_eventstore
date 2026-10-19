@@ -109,6 +109,62 @@ defmodule EventStore.AdvisoryLocksTest do
 
       refute_receive {AdvisoryLocks, :lock_released, ^kept_lock, _reason}, 1_000
     end
+
+    test "should send `lock_released` message without waiting for the connection to reconnect",
+         %{conn: conn} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      without_reconnects(fn _lock_connection ->
+        terminate_lock_session(conn)
+
+        # Using the ended session makes the connection notice it now, not at its next idle ping.
+        # The query bypasses the lock server so it stays free to handle the notice, and
+        # `queue: false` stops a retry from waiting for a connection that cannot start.
+        assert {:error, _error} = Postgrex.query(@conn, "SELECT 1", [], queue: false)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+      end)
+    end
+
+    test "should keep locks when a notice for a previous connection arrives late" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      send(@locks, {:connected, lock_connection_pid()})
+
+      previous_connection = spawn(fn -> :ok end)
+
+      send(@locks, {:disconnected, previous_connection})
+
+      refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+    end
+
+    test "should unlock a lock reported lost while its session is still alive",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      send(@locks, {:connected, lock_connection})
+      send(@locks, {:disconnected, lock_connection})
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, :session_ended}
+
+      send(@locks, {:connected, lock_connection})
+
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
+    test "should send `lock_released` message when the lock connection crashes" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      without_reconnects(fn lock_connection ->
+        Process.exit(lock_connection, :kill)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+      end)
+    end
   end
 
   describe "graceful shutdown" do
@@ -242,6 +298,54 @@ defmodule EventStore.AdvisoryLocksTest do
 
     %Postgrex.Result{rows: [[true]]} =
       Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+    Wait.until(fn ->
+      assert %Postgrex.Result{rows: [[0]]} =
+               Postgrex.query!(
+                 conn,
+                 "SELECT count(*)::int FROM pg_stat_activity WHERE pid = $1",
+                 [
+                   backend_pid
+                 ]
+               )
+    end)
+  end
+
+  defp without_reconnects(fun) do
+    lock_connection = lock_connection_pid()
+
+    {:dictionary, dictionary} = Process.info(lock_connection, :dictionary)
+    [connection_supervisor | _ancestors] = dictionary[:"$ancestors"]
+
+    :ok = :sys.suspend(connection_supervisor)
+
+    try do
+      fun.(lock_connection)
+    after
+      :ok = :sys.resume(connection_supervisor)
+    end
+  end
+
+  defp lock_connection_pid do
+    %Postgrex.Result{rows: [[backend_pid]]} =
+      Postgrex.query!(@conn, "SELECT pg_backend_pid()", [])
+
+    Enum.find(Process.list(), fn pid ->
+      with {:dictionary, dictionary} <- Process.info(pid, :dictionary),
+           {DBConnection.Connection, _function, _arity} <- dictionary[:"$initial_call"],
+           {_state, %{state: %Postgrex.Protocol{connection_id: ^backend_pid}}} <-
+             connection_state(pid) do
+        true
+      else
+        _ -> false
+      end
+    end)
+  end
+
+  defp connection_state(pid) do
+    :sys.get_state(pid, 100)
+  catch
+    :exit, _reason -> nil
   end
 
   defp shutdown_database_connection do
