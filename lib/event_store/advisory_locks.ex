@@ -76,6 +76,7 @@ defmodule EventStore.AdvisoryLocks do
     def current?(%Connection{}, _pid), do: false
   end
 
+  alias DBConnection.ConnectionError
   alias EventStore.AdvisoryLocks.{Connection, Lock, State}
   alias EventStore.Storage
   alias EventStore.Storage.Session
@@ -141,13 +142,15 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   defp try_acquire_exclusive_lock(key, owner, timeout, %State{} = state) do
-    %State{conn: conn, schema: schema} = state
+    %State{schema: schema} = state
 
     with {:ok, %Session{} = session} <-
-           Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
-             schema: schema,
-             timeout: timeout
-           ) do
+           with_pool(state, fn pool ->
+             Storage.Lock.try_acquire_exclusive_session_lock(pool, key,
+               schema: schema,
+               timeout: timeout
+             )
+           end) do
       {:ok, Lock.new(key, owner, session)}
     end
   end
@@ -246,9 +249,9 @@ defmodule EventStore.AdvisoryLocks do
     do: state
 
   defp verify_sessions(%State{} = state) do
-    %State{conn: conn, locks: locks, query_timeout: query_timeout, released: released} = state
+    %State{locks: locks, query_timeout: query_timeout, released: released} = state
 
-    case Session.current(conn, timeout: query_timeout) do
+    case with_pool(state, &Session.current(&1, timeout: query_timeout)) do
       {:ok, %Session{} = session} ->
         {held, lost} = Map.split_with(locks, fn {_ref, lock} -> Lock.held_by?(lock, session) end)
 
@@ -301,8 +304,28 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   defp release_lock(key, %State{} = state) do
-    %State{conn: conn, query_timeout: query_timeout, schema: schema} = state
+    %State{query_timeout: query_timeout, schema: schema} = state
 
-    Storage.Lock.unlock(conn, key, schema: schema, timeout: query_timeout)
+    with_pool(state, &Storage.Lock.unlock(&1, key, schema: schema, timeout: query_timeout))
+  end
+
+  # Querying through the monitored server would wait on a pool that may never answer:
+  # it queues requests while the pool is down and forgets those a dying pool received.
+  defp with_pool(%State{conn: conn}, query) do
+    case MonitoredServer.whereis(conn) do
+      nil ->
+        {:error, ConnectionError.exception("advisory lock connection pool is down")}
+
+      pool ->
+        try do
+          query.(pool)
+        catch
+          :exit, reason ->
+            {:error,
+             ConnectionError.exception(
+               "advisory lock connection pool exited: " <> inspect(reason)
+             )}
+        end
+    end
   end
 end
