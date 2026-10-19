@@ -84,6 +84,13 @@ defmodule EventStore.MonitoredServer do
     GenServer.call(name, {__MODULE__, :monitors})
   end
 
+  @doc """
+  The pid of the started process, or `nil` while it is down.
+  """
+  def whereis(name) do
+    GenServer.call(name, {__MODULE__, :whereis})
+  end
+
   def init(%State{} = state) do
     Process.flag(:trap_exit, true)
 
@@ -105,6 +112,10 @@ defmodule EventStore.MonitoredServer do
     %State{monitors: monitors} = state
 
     {:reply, {:ok, monitors}, state}
+  end
+
+  def handle_call({__MODULE__, :whereis}, _from, %State{pid: pid} = state) do
+    {:reply, pid, state}
   end
 
   def handle_call(msg, from, %State{pid: nil} = state) do
