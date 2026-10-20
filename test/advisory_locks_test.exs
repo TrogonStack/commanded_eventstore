@@ -120,6 +120,62 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "release a lock by reference" do
+    test "should free the key for another session", %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      assert :ok = AdvisoryLocks.release(@locks, lock)
+
+      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+    end
+
+    test "should keep the key held for another owner of the same key",
+         %{conn: conn, schema: schema} do
+      reply_to = self()
+
+      other_owner =
+        spawn_link(fn ->
+          {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+          send(reply_to, :lock_acquired)
+
+          receive do
+            :shutdown -> :ok
+          end
+        end)
+
+      assert_receive :lock_acquired
+
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      assert :ok = AdvisoryLocks.release(@locks, lock)
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      send(other_owner, :shutdown)
+
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
+    test "should ignore a reference that is not held" do
+      assert :ok = AdvisoryLocks.release(@locks, make_ref())
+    end
+
+    test "should not notify the owner that the lock was released" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      assert :ok = AdvisoryLocks.release(@locks, lock)
+
+      refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 200
+    end
+  end
+
   describe "release lock" do
     test "should release lock when process terminates", %{conn: conn, schema: schema} do
       reply_to = self()
