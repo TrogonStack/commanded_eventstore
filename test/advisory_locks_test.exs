@@ -406,6 +406,71 @@ defmodule EventStore.AdvisoryLocksTest do
       refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
     end
 
+    test "should send `lock_released` message when the database stops answering new connections",
+         %{conn: conn, schema: schema} do
+      name = :proxied_lock_store
+      locks = Module.concat([name, AdvisoryLocks])
+      lock_pool = Module.concat([locks, Postgrex])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      proxy =
+        start_supervised!(
+          {EventStore.TcpProxy,
+           {Keyword.fetch!(config, :hostname), Keyword.get(config, :port, 5432)}}
+        )
+
+      start_supervised!(
+        {TestEventStore,
+         name: name,
+         schema: schema,
+         session_mode_pool: [
+           port: EventStore.TcpProxy.port(proxy),
+           timeout: 60_000,
+           idle_interval: 100
+         ]}
+      )
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        %Postgrex.Result{rows: [[backend_pid]]} =
+          Postgrex.query!(lock_pool, "SELECT pg_backend_pid()", [])
+
+        :ok = EventStore.TcpProxy.blackhole(proxy)
+
+        %Postgrex.Result{rows: [[true]]} =
+          Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+        Wait.until(fn ->
+          assert %Postgrex.Result{rows: [[0]]} =
+                   Postgrex.query!(
+                     conn,
+                     "SELECT count(*)::int FROM pg_stat_activity WHERE pid = $1",
+                     [backend_pid]
+                   )
+        end)
+
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_000
+      after
+        EventStore.TcpProxy.stop(proxy)
+      end
+    end
+
+    test "should keep a lock acquired while the lost connection is still closing when its disconnect notice arrives" do
+      lock_connection = lock_connection_pid()
+
+      send(@locks, {AdvisoryLocks, :session_lost, lock_connection})
+
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      send(@locks, {:disconnected, lock_connection})
+
+      refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+    end
+
     test "should unlock a lock reported lost while its session is still alive",
          %{conn: conn, schema: schema} do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
