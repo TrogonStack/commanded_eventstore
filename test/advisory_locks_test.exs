@@ -8,6 +8,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
   @locks TestEventStore.EventStore.AdvisoryLocks
   @conn TestEventStore.EventStore.AdvisoryLocks.Postgrex
+  @monitor TestEventStore.EventStore.AdvisoryLocks.Postgrex.EventStore.MonitoredServer
 
   setup do
     postgrex_config = Config.parsed(TestEventStore, :eventstore) |> Config.default_postgrex_opts()
@@ -225,12 +226,12 @@ defmodule EventStore.AdvisoryLocksTest do
     test "should keep running when the lock pool monitor does not answer" do
       locks = Process.whereis(@locks)
 
-      :ok = :sys.suspend(@conn)
+      :ok = :sys.suspend(@monitor)
 
       try do
-        assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 10_000)
+        assert {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1, 10_000)
       after
-        :ok = :sys.resume(@conn)
+        :ok = :sys.resume(@monitor)
       end
 
       assert Process.whereis(@locks) == locks
@@ -333,6 +334,7 @@ defmodule EventStore.AdvisoryLocksTest do
     test "should acquire lock and keep running" do
       locks_name = Module.concat([__MODULE__, SwitchedRole, AdvisoryLocks])
       conn_name = Module.concat([locks_name, Postgrex])
+      monitor_name = Module.concat([conn_name, MonitoredServer])
 
       config = Config.parsed(TestEventStore, :eventstore)
 
@@ -340,18 +342,20 @@ defmodule EventStore.AdvisoryLocksTest do
         config
         |> Config.advisory_locks_postgrex_opts()
         |> Config.add_connection_listener(locks_name)
+        |> Keyword.put(:name, conn_name)
         |> Keyword.put(:after_connect, {Postgrex, :query!, ["SET ROLE pg_signal_backend", []]})
 
       start_supervised!(
         {MonitoredServer,
-         mfa: {Postgrex, :start_link, [postgrex_config]}, name: conn_name, backoff_min: 30_000},
-        id: conn_name
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
+        id: monitor_name
       )
 
       locks =
         start_supervised!(
           {AdvisoryLocks,
            conn: conn_name,
+           monitor: monitor_name,
            query_timeout: Keyword.fetch!(config, :timeout),
            schema: "public",
            name: locks_name}
@@ -367,6 +371,7 @@ defmodule EventStore.AdvisoryLocksTest do
     test "should send `lock_released` message when the lock connection crashes" do
       locks_name = Module.concat([__MODULE__, ConnectedFirst, AdvisoryLocks])
       conn_name = Module.concat([locks_name, Postgrex])
+      monitor_name = Module.concat([conn_name, MonitoredServer])
 
       config = Config.parsed(TestEventStore, :eventstore)
 
@@ -374,11 +379,12 @@ defmodule EventStore.AdvisoryLocksTest do
         config
         |> Config.advisory_locks_postgrex_opts()
         |> Config.add_connection_listener(locks_name)
+        |> Keyword.put(:name, conn_name)
 
       start_supervised!(
         {MonitoredServer,
-         mfa: {Postgrex, :start_link, [postgrex_config]}, name: conn_name, backoff_min: 30_000},
-        id: conn_name
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
+        id: monitor_name
       )
 
       # The notice for this connection is sent to a lock server that does not exist yet.
@@ -387,6 +393,7 @@ defmodule EventStore.AdvisoryLocksTest do
       start_supervised!(
         {AdvisoryLocks,
          conn: conn_name,
+         monitor: monitor_name,
          query_timeout: Keyword.fetch!(config, :timeout),
          schema: "public",
          name: locks_name}
@@ -505,9 +512,5 @@ defmodule EventStore.AdvisoryLocksTest do
     EventStore.ProcessHelper.shutdown(lock_pool_pid())
   end
 
-  defp lock_pool_pid do
-    %{pid: pid} = :sys.get_state(@conn)
-
-    pid
-  end
+  defp lock_pool_pid, do: Process.whereis(@conn)
 end
