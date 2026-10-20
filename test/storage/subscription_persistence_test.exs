@@ -181,18 +181,15 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     assert after_ack == %Storage.Subscription{before | last_seen: 3}
   end
 
-  test "ack last seen event does not guard against a position going backwards", context do
+  test "ack last seen event late does not roll the position back", context do
     %{conn: conn, schema: schema} = context
 
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
+    :ok = Storage.ack_last_seen_event(conn, subscription_id, 10, schema: schema)
     :ok = Storage.ack_last_seen_event(conn, subscription_id, 5, schema: schema)
-    :ok = Storage.ack_last_seen_event(conn, subscription_id, 2, schema: schema)
 
-    # Storage takes the position it is given. Nothing reaches here out of order, because the one
-    # process that owns a row acknowledges in order, and refusing the write would be indistinguish
-    # able from the row being gone.
-    assert {:ok, %Storage.Subscription{last_seen: 2}} = read_subscription(context)
+    assert {:ok, %Storage.Subscription{last_seen: 10}} = read_subscription(context)
   end
 
   defp read_subscription(context) do
