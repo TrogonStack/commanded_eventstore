@@ -2,7 +2,9 @@ defmodule EventStore.Storage.Lock do
   @moduledoc false
 
   alias EventStore.Sql.Statements
+  alias EventStore.Storage.Lock.Lease
   alias EventStore.Storage.Session
+  alias EventStore.Subscriptions.FencingToken
 
   @doc """
   Use two 32-bit key values for advisory locks where the first key acts as the
@@ -43,6 +45,35 @@ defmodule EventStore.Storage.Lock do
 
       {:ok, %Postgrex.Result{rows: [[false, _backend_pid, _session_id]]}} ->
         {:error, :lock_already_taken}
+
+      {:error, _error} = reply ->
+        reply
+    end
+  end
+
+  @doc """
+  Takes the advisory lock of a subscription and bumps its `lock_generation` in
+  the same statement, returning the lease that fences the subscription's
+  progress writes to this lock owner.
+  """
+  def claim_subscription_lock(conn, subscription_id, opts) do
+    {schema, opts} = Keyword.pop(opts, :schema)
+
+    query = Statements.claim_subscription_lock(schema)
+
+    case Postgrex.query(conn, query, [subscription_id], opts) do
+      {:ok, %Postgrex.Result{rows: [[false, _backend_pid, _session_id, _generation, _last_seen]]}} ->
+        {:error, :lock_already_taken}
+
+      {:ok, %Postgrex.Result{rows: [[true, _backend_pid, _session_id, nil, nil]]}} ->
+        with :ok <- unlock(conn, subscription_id, [schema: schema] ++ opts) do
+          {:error, :subscription_not_found}
+        end
+
+      {:ok, %Postgrex.Result{rows: [[true, backend_pid, session_id, generation, last_seen]]}} ->
+        token = FencingToken.new(subscription_id, generation)
+
+        {:ok, Lease.new(token, last_seen, Session.new(backend_pid, session_id))}
 
       {:error, _error} = reply ->
         reply
