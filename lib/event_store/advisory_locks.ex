@@ -18,6 +18,7 @@ defmodule EventStore.AdvisoryLocks do
     defstruct [
       :conn,
       :connection,
+      :monitor,
       :query_timeout,
       :ref,
       :schema,
@@ -28,10 +29,11 @@ defmodule EventStore.AdvisoryLocks do
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
+      monitor = Keyword.fetch!(opts, :monitor)
       query_timeout = Keyword.fetch!(opts, :query_timeout)
       schema = Keyword.fetch!(opts, :schema)
 
-      %State{conn: conn, query_timeout: query_timeout, schema: schema}
+      %State{conn: conn, monitor: monitor, query_timeout: query_timeout, schema: schema}
     end
   end
 
@@ -93,9 +95,9 @@ defmodule EventStore.AdvisoryLocks do
   def init(%State{} = state) do
     Process.flag(:trap_exit, true)
 
-    %State{conn: conn} = state
+    %State{conn: conn, monitor: monitor} = state
 
-    {:ok, ref} = MonitoredServer.monitor(conn)
+    {:ok, ref} = MonitoredServer.monitor(monitor)
 
     # A connection made before this server was registered announced itself to
     # nobody, so it is replaced by one whose notices can be received.
@@ -145,8 +147,8 @@ defmodule EventStore.AdvisoryLocks do
     %State{schema: schema} = state
 
     with {:ok, %Session{} = session} <-
-           with_pool(state, fn pool ->
-             Storage.Lock.try_acquire_exclusive_session_lock(pool, key,
+           query(state, fn conn ->
+             Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
                schema: schema,
                timeout: timeout
              )
@@ -251,7 +253,7 @@ defmodule EventStore.AdvisoryLocks do
   defp verify_sessions(%State{} = state) do
     %State{locks: locks, query_timeout: query_timeout, released: released} = state
 
-    case with_pool(state, &Session.current(&1, timeout: query_timeout)) do
+    case query(state, &Session.current(&1, timeout: query_timeout)) do
       {:ok, %Session{} = session} ->
         {held, lost} = Map.split_with(locks, fn {_ref, lock} -> Lock.held_by?(lock, session) end)
 
@@ -306,16 +308,11 @@ defmodule EventStore.AdvisoryLocks do
   defp release_lock(key, %State{} = state) do
     %State{query_timeout: query_timeout, schema: schema} = state
 
-    with_pool(state, &Storage.Lock.unlock(&1, key, schema: schema, timeout: query_timeout))
+    query(state, &Storage.Lock.unlock(&1, key, schema: schema, timeout: query_timeout))
   end
 
-  # Querying through the monitored server would wait on a pool that may never answer:
-  # it queues requests while the pool is down and forgets those a dying pool received.
-  defp with_pool(%State{conn: conn}, query) do
-    case MonitoredServer.whereis(conn) do
-      nil -> {:error, ConnectionError.exception("advisory lock connection pool is down")}
-      pool -> query.(pool)
-    end
+  defp query(%State{conn: conn}, fun) do
+    fun.(conn)
   catch
     :exit, reason ->
       {:error,

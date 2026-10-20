@@ -59,9 +59,13 @@ defmodule EventStore.Supervisor do
         advisory_locks_name = Module.concat([name, AdvisoryLocks])
         advisory_locks_postgrex_conn = Module.concat([advisory_locks_name, Postgrex])
 
+        advisory_locks_postgrex_monitor =
+          Module.concat([advisory_locks_name, Postgrex, MonitoredServer])
+
         advisory_locks_config =
           config
           |> Config.advisory_locks_postgrex_opts()
+          |> Keyword.put(:name, advisory_locks_postgrex_conn)
           |> Config.add_connection_listener(advisory_locks_name)
 
         subscriptions_name = Module.concat([name, Subscriptions.Supervisor])
@@ -81,12 +85,13 @@ defmodule EventStore.Supervisor do
             Supervisor.child_spec(
               {MonitoredServer,
                mfa: {Postgrex, :start_link, [advisory_locks_config]},
-               name: advisory_locks_postgrex_conn,
+               name: advisory_locks_postgrex_monitor,
                backoff_min: 30_000},
-              id: Module.concat([advisory_locks_postgrex_conn, MonitoredServer])
+              id: advisory_locks_postgrex_monitor
             ),
             {AdvisoryLocks,
              conn: advisory_locks_postgrex_conn,
+             monitor: advisory_locks_postgrex_monitor,
              query_timeout: query_timeout,
              schema: schema,
              name: advisory_locks_name}
