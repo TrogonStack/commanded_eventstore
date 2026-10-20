@@ -18,6 +18,7 @@ defmodule EventStore.AdvisoryLocks do
     defstruct [
       :conn,
       :connection,
+      :lost_connection,
       :monitor,
       :query_timeout,
       :ref,
@@ -320,6 +321,11 @@ defmodule EventStore.AdvisoryLocks do
   def handle_info({:connected, conn_pid, _tag}, %State{} = state) when is_pid(conn_pid),
     do: {:noreply, connected(conn_pid, state)}
 
+  # Sent as the connection starts closing, which can take a long time when the
+  # database stops answering, ahead of its `:disconnected` notice.
+  def handle_info({__MODULE__, :session_lost, conn_pid}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, disconnected(conn_pid, :session_ended, state)}
+
   def handle_info({:disconnected, conn_pid}, %State{} = state) when is_pid(conn_pid),
     do: {:noreply, disconnected(conn_pid, :session_ended, state)}
 
@@ -361,8 +367,14 @@ defmodule EventStore.AdvisoryLocks do
   defp connected(conn_pid, %State{connection: connection} = state) do
     Connection.demonitor(connection)
 
-    verify_sessions(%State{state | connection: Connection.monitor(conn_pid)})
+    verify_sessions(%State{
+      state
+      | connection: Connection.monitor(conn_pid),
+        lost_connection: nil
+    })
   end
+
+  defp disconnected(conn_pid, _reason, %State{lost_connection: conn_pid} = state), do: state
 
   # A lock taken through the next connection can be recorded before this notice
   # is handled, so it is released here too and only unlocked once verified.
@@ -374,7 +386,13 @@ defmodule EventStore.AdvisoryLocks do
 
       notify_lost_locks(locks, reason)
 
-      %State{state | connection: nil, locks: %{}, released: Map.values(locks) ++ released}
+      %State{
+        state
+        | connection: nil,
+          lost_connection: conn_pid,
+          locks: %{},
+          released: Map.values(locks) ++ released
+      }
     else
       state
     end

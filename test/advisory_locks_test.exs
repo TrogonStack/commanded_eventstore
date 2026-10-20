@@ -155,7 +155,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
       shutdown_database_connection()
 
-      assert_receive({AdvisoryLocks, :lock_released, ^ref, :shutdown})
+      assert_receive({AdvisoryLocks, :lock_released, ^ref, :session_ended})
     end
 
     test "should release the lock when the owner terminates", context do
@@ -345,7 +345,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
       shutdown_database_connection()
 
-      assert_receive({AdvisoryLocks, :lock_released, ^lock, :shutdown})
+      assert_receive({AdvisoryLocks, :lock_released, ^lock, _reason})
     end
 
     test "should send `lock_released` message when the lock session ends and the connection reconnects",
