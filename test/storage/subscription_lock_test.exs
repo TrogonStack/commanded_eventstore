@@ -38,7 +38,9 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     %{conn: conn, schema: schema} = context
     %{subscription_id: subscription_id} = create_subscription(context)
 
-    :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+    {:ok, %{token: token}} = Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    :ok = Storage.ack_last_seen_event(conn, token, 3, schema: schema)
 
     assert {:ok, %{last_seen: 3}} =
              Lock.claim_subscription_lock(conn, subscription_id, schema: schema)

@@ -2,6 +2,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
   use EventStore.StorageCase
 
   alias EventStore.{Storage, UUID}
+  alias EventStore.Storage.Lock
   alias EventStore.Subscriptions.{SubscriptionFsm, SubscriptionState}
 
   # The states that own a stored position, and those that do not.
@@ -20,7 +21,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     [
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
-      subscription_id: subscription_id
+      subscription_id: subscription_id,
+      fencing_token: claim_token(context, subscription_id)
     ]
   end
 
@@ -305,6 +307,13 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
   end
 
+  defp claim_token(%{conn: conn, schema: schema}, subscription_id) do
+    {:ok, %Lock.Lease{token: token}} =
+      Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    token
+  end
+
   defp fsm(context, overrides \\ []) do
     %{conn: conn, schema: schema} = context
     %{stream_uuid: stream_uuid, subscription_name: subscription_name} = context
@@ -316,6 +325,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
       subscription_id: subscription_id,
+      fencing_token: context.fencing_token,
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
       query_timeout: 15_000,

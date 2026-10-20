@@ -2,7 +2,7 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   use EventStore.StorageCase
 
   alias EventStore.{Config, EventFactory, Storage, UUID, Wait}
-  alias EventStore.Subscriptions.Subscription
+  alias EventStore.Subscriptions.{FencingToken, Subscription}
 
   @conn TestEventStore.Postgrex
   @advisory_locks_conn TestEventStore.EventStore.AdvisoryLocks.Postgrex
@@ -81,7 +81,9 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
       {:ok, %Storage.Subscription{subscription_id: subscription_id}} =
         Storage.Subscription.subscription(@conn, "$all", subscription_name, schema: schema)
 
-      :ok = Storage.Subscription.ack_last_seen_event(@conn, subscription_id, 2, schema: schema)
+      token = FencingToken.new(subscription_id, lock_generation(subscription_id, schema))
+
+      :ok = Storage.Subscription.ack_last_seen_event(@conn, token, 2, schema: schema)
 
       :ok = reconnect(subscription)
 
@@ -270,6 +272,17 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
       Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
 
     :ok
+  end
+
+  defp lock_generation(subscription_id, schema) do
+    %Postgrex.Result{rows: [[generation]]} =
+      Postgrex.query!(
+        @conn,
+        "SELECT lock_generation FROM \"#{schema}\".subscriptions WHERE subscription_id = $1",
+        [subscription_id]
+      )
+
+    generation
   end
 
   defp reconnect(subscription) do

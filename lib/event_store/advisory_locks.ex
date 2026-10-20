@@ -172,6 +172,35 @@ defmodule EventStore.AdvisoryLocks do
     GenServer.call(server, {:try_subscription_lock, subscription_id, self(), timeout}, timeout)
   end
 
+  @doc """
+  Release a lock acquired by `try_advisory_lock/3` or `try_subscription_lock/3`
+  before its owner terminates.
+
+  The owner is not sent a `lock_released` message. Releasing a reference that is
+  no longer held succeeds.
+  """
+  @spec release(server :: GenServer.server(), reference()) :: :ok
+  def release(server, ref) when is_reference(ref) do
+    GenServer.call(server, {:release, ref})
+  end
+
+  def handle_call({:release, ref}, _from, %State{} = state) do
+    %State{locks: locks} = state
+
+    state =
+      case Enum.find(locks, fn {_owner_ref, lock} -> Lock.ref(lock) == ref end) do
+        nil ->
+          state
+
+        {owner_ref, %Lock{} = lock} ->
+          Process.demonitor(owner_ref, [:flush])
+
+          release_held_lock(lock, %State{state | locks: Map.delete(locks, owner_ref)})
+      end
+
+    {:reply, :ok, state}
+  end
+
   def handle_call(
         {:try_subscription_lock, subscription_id, owner, timeout},
         _from,
@@ -367,6 +396,22 @@ defmodule EventStore.AdvisoryLocks do
     end
 
     :ok
+  end
+
+  # Each acquisition counts as a separate hold on the key, so releasing one unlocks it once
+  # and leaves the holds of every other owner in place.
+  defp release_held_lock(%Lock{key: key} = lock, %State{} = state) do
+    %State{query_timeout: query_timeout, released: released} = state
+
+    case query(state, &Session.current(&1, timeout: query_timeout)) do
+      {:ok, %Session{} = session} ->
+        if Lock.held_by?(lock, session), do: release_lock(key, state)
+
+        state
+
+      {:error, _error} ->
+        %State{state | released: [lock | released]}
+    end
   end
 
   defp release_lock(key, %State{} = state) do

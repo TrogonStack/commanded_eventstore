@@ -72,10 +72,11 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     data = SubscriptionState.reset_event_tracking(data)
 
     with {:ok, subscription} <- create_subscription(data),
-         {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription),
+         {:ok, %AdvisoryLocks.Lease{} = lease} <-
+           try_acquire_subscription_lock(data, subscription),
          :ok <- subscribe_to_events(data) do
-      %Storage.Subscription{subscription_id: subscription_id, last_seen: last_seen} =
-        subscription
+      %Storage.Subscription{subscription_id: subscription_id} = subscription
+      %AdvisoryLocks.Lease{ref: lock_ref, token: token, last_seen: last_seen} = lease
 
       last_seen = last_seen || 0
 
@@ -83,6 +84,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         data
         | subscription_id: subscription_id,
           lock_ref: lock_ref,
+          fencing_token: token,
           last_received: last_seen,
           last_sent: last_seen,
           last_ack: last_seen
@@ -101,11 +103,10 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   # Attempt to subscribe
   def subscribe(%__MODULE__{state: :disconnected, data: %SubscriptionState{} = data} = fsm) do
     with {:ok, subscription} <- create_subscription(data),
-         {:ok, lock_ref} <- try_acquire_exclusive_lock(data, subscription) do
-      %Storage.Subscription{
-        subscription_id: subscription_id,
-        last_seen: last_seen
-      } = subscription
+         {:ok, %AdvisoryLocks.Lease{} = lease} <-
+           try_acquire_subscription_lock(data, subscription) do
+      %Storage.Subscription{subscription_id: subscription_id} = subscription
+      %AdvisoryLocks.Lease{ref: lock_ref, token: token, last_seen: last_seen} = lease
 
       last_ack = last_seen || 0
 
@@ -113,6 +114,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         data
         | subscription_id: subscription_id,
           lock_ref: lock_ref,
+          fencing_token: token,
           last_sent: last_ack,
           last_ack: last_ack
       }
@@ -306,7 +308,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         lock_ref
       ) do
     data =
-      %SubscriptionState{data | lock_ref: nil}
+      %SubscriptionState{data | lock_ref: nil, fencing_token: nil}
       |> SubscriptionState.reset_event_tracking()
       |> purge_in_flight_events()
 
@@ -357,7 +359,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     )
   end
 
-  defp try_acquire_exclusive_lock(
+  defp try_acquire_subscription_lock(
          %SubscriptionState{} = data,
          %Storage.Subscription{} = subscription
        ) do
@@ -366,7 +368,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
     server = Module.concat(event_store, AdvisoryLocks)
 
-    AdvisoryLocks.try_advisory_lock(server, subscription_id, timeout)
+    AdvisoryLocks.try_subscription_lock(server, subscription_id, timeout)
   end
 
   defp subscribe_to_events(%SubscriptionState{} = data) do
@@ -765,14 +767,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       schema: schema,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
-      subscription_id: subscription_id,
+      fencing_token: fencing_token,
+      lock_ref: lock_ref,
       last_ack: last_ack,
       query_timeout: query_timeout,
       checkpoints_pending: checkpoints_pending,
       telemetry_metadata: telemetry_metadata
     } = data
 
-    if checkpoints_pending > 0 do
+    if checkpoints_pending > 0 and fencing_token != nil do
       metadata =
         Map.merge(telemetry_metadata, %{
           stream_uuid: stream_uuid,
@@ -782,7 +785,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
       result =
         Telemetry.span(:subscription_checkpoint, metadata, fn ->
-          Storage.Subscription.ack_last_seen_event(conn, subscription_id, last_ack,
+          Storage.Subscription.ack_last_seen_event(conn, fencing_token, last_ack,
             schema: schema,
             timeout: query_timeout
           )
@@ -794,6 +797,9 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       case result do
         {:error, :subscription_not_found} ->
           send(self(), {:checkpoint_failed, :subscription_not_found})
+
+        {:error, :fenced} ->
+          send(self(), {:fenced, lock_ref})
 
         _ ->
           :ok

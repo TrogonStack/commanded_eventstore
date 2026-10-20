@@ -2,6 +2,8 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
   use EventStore.StorageCase
 
   alias EventStore.Storage
+  alias EventStore.Storage.Lock
+  alias EventStore.Subscriptions.FencingToken
 
   @all_stream "$all"
   @subscription_name "test_subscription"
@@ -74,10 +76,12 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
+    token = claim_token(context, subscription_id)
+
     :ok = delete_subscription(context)
 
     assert {:error, :subscription_not_found} =
-             Storage.ack_last_seen_event(conn, subscription_id, 1, schema: schema)
+             Storage.ack_last_seen_event(conn, token, 1, schema: schema)
   end
 
   test "ack last seen event only moves the subscription it names", context do
@@ -88,7 +92,7 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     {:ok, %Storage.Subscription{subscription_id: untouched}} =
       Storage.subscribe_to_stream(conn, @all_stream, "another_subscription", schema: schema)
 
-    :ok = Storage.ack_last_seen_event(conn, acked, 1, schema: schema)
+    :ok = Storage.ack_last_seen_event(conn, claim_token(context, acked), 1, schema: schema)
 
     assert {:ok, %Storage.Subscription{subscription_id: ^acked, last_seen: 1}} =
              Storage.Subscription.subscription(conn, @all_stream, @subscription_name,
@@ -106,6 +110,8 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{subscription_id: deleted}} = subscribe_to_stream(context)
 
+    deleted_token = claim_token(context, deleted)
+
     :ok = delete_subscription(context)
 
     {:ok, %Storage.Subscription{subscription_id: recreated}} = subscribe_to_stream(context)
@@ -113,7 +119,7 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     assert recreated != deleted
 
     assert {:error, :subscription_not_found} =
-             Storage.ack_last_seen_event(conn, deleted, 1, schema: schema)
+             Storage.ack_last_seen_event(conn, deleted_token, 1, schema: schema)
 
     # The stream and name are the same as the deleted subscription's, so anything keyed by those
     # would have credited this subscription with a position it never acknowledged.
@@ -130,7 +136,9 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
     assert {:error, %Postgrex.Error{}} =
-             Storage.ack_last_seen_event(conn, subscription_id, 1, schema: "no_such_schema")
+             Storage.ack_last_seen_event(conn, claim_token(context, subscription_id), 1,
+               schema: "no_such_schema"
+             )
   end
 
   test "ack last seen event for a subscription that never existed", context do
@@ -139,7 +147,9 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
     assert {:error, :subscription_not_found} =
-             Storage.ack_last_seen_event(conn, subscription_id + 1_000, 1, schema: schema)
+             Storage.ack_last_seen_event(conn, FencingToken.new(subscription_id + 1_000, 1), 1,
+               schema: schema
+             )
 
     assert {:ok, %Storage.Subscription{last_seen: nil}} = read_subscription(context)
   end
@@ -149,11 +159,13 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
-    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+    token = claim_token(context, subscription_id)
+
+    assert :ok = Storage.ack_last_seen_event(conn, token, 3, schema: schema)
 
     # Postgres counts the rows it matched rather than the rows it changed, so an acknowledgement
     # that moves nothing is still an acknowledgement its row accepted.
-    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+    assert :ok = Storage.ack_last_seen_event(conn, token, 3, schema: schema)
 
     assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
   end
@@ -163,7 +175,9 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
-    assert :ok = Storage.ack_last_seen_event(conn, subscription_id, 0, schema: schema)
+    token = claim_token(context, subscription_id)
+
+    assert :ok = Storage.ack_last_seen_event(conn, token, 0, schema: schema)
 
     # Zero is a position that was acknowledged, where null is a subscription that never has.
     assert {:ok, %Storage.Subscription{last_seen: 0}} = read_subscription(context)
@@ -174,7 +188,9 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{} = before} = subscribe_to_stream(context)
 
-    :ok = Storage.ack_last_seen_event(conn, before.subscription_id, 3, schema: schema)
+    token = claim_token(context, before.subscription_id)
+
+    :ok = Storage.ack_last_seen_event(conn, token, 3, schema: schema)
 
     assert {:ok, %Storage.Subscription{} = after_ack} = read_subscription(context)
 
@@ -186,8 +202,10 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
 
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
 
-    :ok = Storage.ack_last_seen_event(conn, subscription_id, 10, schema: schema)
-    :ok = Storage.ack_last_seen_event(conn, subscription_id, 5, schema: schema)
+    token = claim_token(context, subscription_id)
+
+    :ok = Storage.ack_last_seen_event(conn, token, 10, schema: schema)
+    :ok = Storage.ack_last_seen_event(conn, token, 5, schema: schema)
 
     assert {:ok, %Storage.Subscription{last_seen: 10}} = read_subscription(context)
   end
@@ -204,7 +222,16 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     {:ok, %Storage.Subscription{subscription_id: subscription_id}} =
       Storage.Subscription.subscription(conn, @all_stream, @subscription_name, schema: schema)
 
-    Storage.ack_last_seen_event(conn, subscription_id, last_seen, schema: schema)
+    token = claim_token(context, subscription_id)
+
+    Storage.ack_last_seen_event(conn, token, last_seen, schema: schema)
+  end
+
+  defp claim_token(%{conn: conn, schema: schema}, subscription_id) do
+    {:ok, %Lock.Lease{token: token}} =
+      Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    token
   end
 
   defp subscribe_to_stream(context) do
