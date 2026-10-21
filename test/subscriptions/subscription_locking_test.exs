@@ -223,6 +223,65 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     end
   end
 
+  describe "late fenced notice" do
+    setup [:create_subscription]
+
+    test "should keep running when the lock was already released", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      monitor_ref = Process.monitor(subscription)
+
+      lock_ref = lock_ref(subscription)
+
+      :ok = disconnect(subscription)
+      :sys.get_state(subscription)
+
+      send(subscription, {:fenced, lock_ref})
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      :ok = reconnect(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+
+    test "should ignore a notice for a lock that was replaced by a new one", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      monitor_ref = Process.monitor(subscription)
+
+      old_lock_ref = lock_ref(subscription)
+
+      :ok = disconnect(subscription)
+      :ok = reconnect(subscription)
+
+      new_lock_ref = wait_for_new_lock_ref(subscription, old_lock_ref)
+
+      Wait.until(fn -> assert :subscribed == subscription_state(subscription) end)
+
+      send(subscription, {:fenced, old_lock_ref})
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      assert :subscribed == subscription_state(subscription)
+      assert new_lock_ref == lock_ref(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+  end
+
   describe "subscription stopped after another owner took over" do
     test "should leave the progress of the new owner untouched", %{
       conn: conn,
@@ -351,6 +410,12 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     %Subscription{subscription: %{data: %{lock_ref: lock_ref}}} = :sys.get_state(subscription)
 
     lock_ref
+  end
+
+  defp subscription_state(subscription) do
+    %Subscription{subscription: %{state: state}} = :sys.get_state(subscription)
+
+    state
   end
 
   defp wait_for_new_lock_ref(subscription, old_lock_ref) do
