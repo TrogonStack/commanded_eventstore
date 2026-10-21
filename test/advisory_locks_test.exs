@@ -174,6 +174,24 @@ defmodule EventStore.AdvisoryLocksTest do
 
       refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 200
     end
+
+    test "should not wait for the lock server to answer", %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      :ok = :sys.suspend(@locks)
+
+      try do
+        {elapsed, :ok} = :timer.tc(fn -> AdvisoryLocks.release(@locks, lock) end, :millisecond)
+
+        assert elapsed < 1_000
+      after
+        :ok = :sys.resume(@locks)
+      end
+
+      _state = :sys.get_state(@locks)
+
+      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+    end
   end
 
   describe "release lock" do
