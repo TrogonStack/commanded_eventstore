@@ -75,7 +75,12 @@ defmodule EventStore.Storage.Lock do
 
         {:ok, Lease.new(token, last_seen, Session.new(backend_pid, session_id))}
 
-      {:error, _error} = reply ->
+      {:error, %Postgrex.Error{} = error} ->
+        _ = unlock(conn, subscription_id, [schema: schema] ++ opts)
+
+        {:error, error}
+
+      {:error, %DBConnection.ConnectionError{}} = reply ->
         reply
     end
   end
