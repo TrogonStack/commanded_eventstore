@@ -25,14 +25,22 @@ defmodule EventStore.AdvisoryLocksTest do
       assert is_reference(lock)
     end
 
-    test "should acquire lock when same process already has lock" do
+    test "should hand the owner the lock it already holds and free it with one release",
+         %{conn: conn, schema: schema} do
       assert {:ok, lock1} = AdvisoryLocks.try_advisory_lock(@locks, 1)
       assert {:ok, lock2} = AdvisoryLocks.try_advisory_lock(@locks, 1)
       assert {:ok, lock3} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
       assert is_reference(lock1)
-      assert is_reference(lock2)
-      assert is_reference(lock3)
+      assert lock2 == lock1
+      assert lock3 == lock1
+
+      assert :ok = AdvisoryLocks.release(@locks, lock1)
+
+      _state = :sys.get_state(@locks)
+
+      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      assert :ok = Storage.Lock.unlock(conn, 1, schema: schema)
     end
 
     test "should fail to acquire lock when already taken", %{conn: conn, schema: schema} do
@@ -62,6 +70,66 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert {:ok, %{token: %{generation: 2}}} =
                AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+    end
+
+    test "should keep one hold when the owner claims the lock again", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      assert {:ok, %AdvisoryLocks.Lease{} = first} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      Postgrex.query!(
+        conn,
+        "UPDATE \"#{schema}\".subscriptions SET last_seen = 7 WHERE subscription_id = $1",
+        [subscription_id]
+      )
+
+      assert {:ok, %AdvisoryLocks.Lease{} = second} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      assert second.ref == first.ref
+      assert second.token.generation == first.token.generation + 1
+      assert second.last_seen == 7
+
+      assert :ok = AdvisoryLocks.release(@locks, first.ref)
+
+      _state = :sys.get_state(@locks)
+
+      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
+      assert :ok = Storage.Lock.unlock(conn, subscription_id, schema: schema)
+    end
+
+    test "should free the lock with one release after a claim outlived its caller", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, busy_ref} = AdvisoryLocks.try_advisory_lock(@locks, 2)
+
+      holder = hold_only_connection()
+
+      try do
+        :ok = AdvisoryLocks.release(@locks, busy_ref)
+
+        wait_until_waiting_for_connection()
+
+        assert {:error, :timeout} =
+                 AdvisoryLocks.try_subscription_lock(@locks, subscription_id, 300)
+      after
+        send(holder, :release)
+      end
+
+      _state = :sys.get_state(@locks, 5_000)
+
+      assert {:ok, %AdvisoryLocks.Lease{ref: ref}} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      assert :ok = AdvisoryLocks.release(@locks, ref)
+
+      _state = :sys.get_state(@locks, 5_000)
+
+      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
+      assert :ok = Storage.Lock.unlock(conn, subscription_id, schema: schema)
     end
 
     test "should fail to acquire the lock when another session holds it", context do

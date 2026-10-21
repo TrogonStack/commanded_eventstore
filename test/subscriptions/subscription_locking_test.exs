@@ -7,6 +7,7 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   alias EventStore.Subscriptions.{FencingToken, Subscription}
 
   @conn TestEventStore.Postgrex
+  @advisory_locks TestEventStore.EventStore.AdvisoryLocks
   @advisory_locks_conn TestEventStore.EventStore.AdvisoryLocks.Postgrex
 
   setup do
@@ -429,6 +430,9 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   end
 
   defp release_lock(subscription, lock_ref) do
+    :ok = EventStore.AdvisoryLocks.release(@advisory_locks, lock_ref)
+    _state = :sys.get_state(@advisory_locks)
+
     Process.send(
       subscription,
       {EventStore.AdvisoryLocks, :lock_released, lock_ref, :shutdown},
