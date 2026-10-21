@@ -1,7 +1,7 @@
 defmodule EventStore.Subscriptions.SubscriptionFsmTest do
   use EventStore.StorageCase
 
-  alias EventStore.{Storage, UUID}
+  alias EventStore.{EventFactory, Storage, UUID}
   alias EventStore.Storage.Lock
   alias EventStore.Subscriptions.{SubscriptionFsm, SubscriptionState}
 
@@ -18,11 +18,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         schema: context.schema
       )
 
+    fencing_token = claim_token(context, subscription_id)
+
+    on_exit(fn -> :ok = Lock.unlock(context.conn, subscription_id, schema: context.schema) end)
+
     [
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
       subscription_id: subscription_id,
-      fencing_token: claim_token(context, subscription_id)
+      fencing_token: fencing_token
     ]
   end
 
@@ -307,6 +311,46 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
   end
 
+  describe "subscribe/1 after another owner advanced the stored position" do
+    test "catches up to the stored position and subscribes instead of spinning on empty reads",
+         context do
+      reclaim_after_other_owner_acked(context, appended: 15, stored: 15)
+
+      fsm = fsm(context, state: :disconnected, last_received: 10, last_sent: 5, last_ack: 5)
+
+      assert %SubscriptionFsm{state: :request_catch_up, data: data} =
+               SubscriptionFsm.subscribe(fsm)
+
+      assert data.last_ack == 15
+      assert data.last_sent == 15
+
+      assert %SubscriptionFsm{state: :subscribed, data: data} =
+               SubscriptionFsm.catch_up(%SubscriptionFsm{state: :request_catch_up, data: data})
+
+      assert data.last_received == 15
+    end
+  end
+
+  defp reclaim_after_other_owner_acked(context, appended: appended, stored: stored) do
+    %{conn: conn, schema: schema, subscription_id: subscription_id} = context
+
+    :ok =
+      TestEventStore.append_to_stream(
+        context.stream_uuid,
+        0,
+        EventFactory.create_events(appended)
+      )
+
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        ~s|UPDATE "#{schema}".subscriptions SET last_seen = $2 WHERE subscription_id = $1|,
+        [subscription_id, stored]
+      )
+
+    :ok = Lock.unlock(conn, subscription_id, schema: schema)
+  end
+
   defp claim_token(%{conn: conn, schema: schema}, subscription_id) do
     {:ok, %Lock.Lease{token: token}} =
       Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
@@ -329,6 +373,13 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
       query_timeout: 15_000,
+      event_store: TestEventStore,
+      serializer: context.serializer,
+      correlation_id_type: context.correlation_id_type,
+      causation_id_type: context.causation_id_type,
+      max_size: 1_000,
+      last_received: Keyword.get(overrides, :last_received, 0),
+      last_sent: Keyword.get(overrides, :last_sent, 0),
       transient: Keyword.get(overrides, :transient, false)
     }
 
