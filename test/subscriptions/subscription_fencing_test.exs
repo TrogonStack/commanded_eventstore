@@ -186,24 +186,7 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
 
   # Takes A's lock session away and has B own the subscription at event 5.
   defp take_over(subscription_name, conn, schema, proxy) do
-    lock_pool = Module.concat([@store_a, EventStore.AdvisoryLocks, Postgrex])
-
-    %Postgrex.Result{rows: [[backend_pid]]} =
-      Postgrex.query!(lock_pool, "SELECT pg_backend_pid()", [])
-
-    :ok = TcpProxy.blackhole(proxy)
-
-    %Postgrex.Result{rows: [[true]]} =
-      Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
-
-    Wait.until(fn ->
-      assert %Postgrex.Result{rows: [[0]]} =
-               Postgrex.query!(
-                 conn,
-                 "SELECT count(*)::int FROM pg_stat_activity WHERE pid = $1",
-                 [backend_pid]
-               )
-    end)
+    end_lock_session(conn, proxy)
 
     subscriber_b = start_forwarding_subscriber(:b)
 
@@ -223,6 +206,122 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     flush_events()
 
     {subscription_b, subscriber_b}
+  end
+
+  defp end_lock_session(conn, proxy) do
+    lock_pool = Module.concat([@store_a, EventStore.AdvisoryLocks, Postgrex])
+
+    %Postgrex.Result{rows: [[backend_pid]]} =
+      Postgrex.query!(lock_pool, "SELECT pg_backend_pid()", [])
+
+    :ok = TcpProxy.blackhole(proxy)
+
+    %Postgrex.Result{rows: [[true]]} =
+      Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+    Wait.until(fn ->
+      assert %Postgrex.Result{rows: [[0]]} =
+               Postgrex.query!(
+                 conn,
+                 "SELECT count(*)::int FROM pg_stat_activity WHERE pid = $1",
+                 [backend_pid]
+               )
+    end)
+  end
+
+  defp take_over_all(tagged_names, conn, schema, proxy) do
+    end_lock_session(conn, proxy)
+
+    owners =
+      for {tag, subscription_name} <- tagged_names do
+        subscriber = start_forwarding_subscriber(tag)
+
+        {:ok, subscription} =
+          TestEventStore.subscribe_to_all_streams(subscription_name, subscriber,
+            name: @store_b,
+            buffer_size: 10
+          )
+
+        assert_receive {^tag, :subscribed, ^subscription}, 5_000
+        assert_receive {^tag, :events, [%{event_number: 4} | _]}, 5_000
+
+        send(subscriber, {:ack, subscription, 5})
+
+        Wait.until(fn -> assert 5 == last_seen(conn, schema, subscription_name) end)
+
+        {tag, subscription}
+      end
+
+    flush_tagged_events([:a1, :a2, :b1, :b2])
+
+    owners
+  end
+
+  defp flush_tagged_events(tags), do: Enum.each(tags, &flush_tagged/1)
+
+  defp flush_tagged(tag) do
+    receive do
+      {^tag, :events, _events} -> flush_tagged(tag)
+    after
+      0 -> :ok
+    end
+  end
+
+  test "every subscription on a node whose lock session ends is fenced and recovers",
+       %{conn: conn, schema: schema, proxy: proxy, subscription_name: subscription_name} do
+    other_name = UUID.uuid4()
+    subscriber_1 = start_forwarding_subscriber(:a1)
+    subscriber_2 = start_forwarding_subscriber(:a2)
+
+    {:ok, subscription_1} = subscribe_a(subscription_name, subscriber_1)
+    {:ok, subscription_2} = subscribe_a(other_name, subscriber_2)
+
+    assert_receive {:a1, :subscribed, ^subscription_1}
+    assert_receive {:a2, :subscribed, ^subscription_2}
+
+    append_to_a(7)
+
+    for tag <- [:a1, :a2], do: assert_receive_tagged_through(tag, 7)
+
+    send(subscriber_1, {:ack, subscription_1, 3})
+    send(subscriber_2, {:ack, subscription_2, 3})
+
+    for name <- [subscription_name, other_name] do
+      Wait.until(fn -> assert 3 == last_seen(conn, schema, name) end)
+    end
+
+    take_over_all([b1: subscription_name, b2: other_name], conn, schema, proxy)
+
+    send(subscriber_1, {:ack, subscription_1, 7})
+    send(subscriber_2, {:ack, subscription_2, 7})
+
+    for subscription <- [subscription_1, subscription_2] do
+      Wait.until(fn -> assert :disconnected == subscription_state(subscription) end)
+    end
+
+    for name <- [subscription_name, other_name] do
+      assert 5 == last_seen(conn, schema, name)
+    end
+
+    flush_tagged_events([:a1, :a2, :b1, :b2])
+
+    stop_supervised!(@store_b)
+    :ok = TcpProxy.forward(proxy)
+
+    assert_receive {:a1, :events, [%{event_number: 6} | _]}, 5_000
+    assert_receive {:a2, :events, [%{event_number: 6} | _]}, 5_000
+
+    for name <- [subscription_name, other_name] do
+      assert 3 == lock_generation(conn, schema, name)
+    end
+  end
+
+  defp assert_receive_tagged_through(tag, last_event_number) do
+    assert_receive {^tag, :events, events}
+
+    unless List.last(events).event_number >= last_event_number do
+      assert_receive_tagged_through(tag, last_event_number)
+    end
   end
 
   test "every subscriber of a fenced subscription stops receiving events",
