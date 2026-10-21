@@ -178,13 +178,16 @@ defmodule EventStore.AdvisoryLocks do
 
   The owner is not sent a `lock_released` message. Releasing a reference that is
   no longer held succeeds.
+
+  Returns as soon as the request is queued so a caller is never held up by a
+  lock connection that has stopped answering.
   """
   @spec release(server :: GenServer.server(), reference()) :: :ok
   def release(server, ref) when is_reference(ref) do
-    GenServer.call(server, {:release, ref})
+    GenServer.cast(server, {:release, ref})
   end
 
-  def handle_call({:release, ref}, _from, %State{} = state) do
+  def handle_cast({:release, ref}, %State{} = state) do
     %State{locks: locks} = state
 
     state =
@@ -198,7 +201,7 @@ defmodule EventStore.AdvisoryLocks do
           release_held_lock(lock, %State{state | locks: Map.delete(locks, owner_ref)})
       end
 
-    {:reply, :ok, state}
+    {:noreply, state}
   end
 
   def handle_call(

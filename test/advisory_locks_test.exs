@@ -129,7 +129,9 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert :ok = AdvisoryLocks.release(@locks, lock)
 
-      assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
     end
 
     test "should keep the key held for another owner of the same key",
@@ -152,6 +154,8 @@ defmodule EventStore.AdvisoryLocksTest do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
       assert :ok = AdvisoryLocks.release(@locks, lock)
+
+      _state = :sys.get_state(@locks)
 
       assert {:error, :lock_already_taken} =
                Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
