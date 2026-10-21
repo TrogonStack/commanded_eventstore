@@ -161,6 +161,31 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_received {:checkpoint_failed, :subscription_not_found}
     end
 
+    test "tells the subscription it is fenced when the probe that classifies the rejection fails",
+         context do
+      %{conn: conn, schema: schema, subscription_id: subscription_id} = context
+
+      probe_conn = start_supervised!({Postgrex, context.postgrex_config}, id: :probe_conn)
+      lock_ref = make_ref()
+
+      fsm = fsm(context, checkpoints_pending: 1, last_ack: 3, conn: probe_conn)
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{fsm.data | lock_ref: lock_ref}}
+
+      {:ok, _result} =
+        Postgrex.query(
+          conn,
+          ~s|UPDATE "#{schema}".subscriptions SET lock_generation = lock_generation + 1 WHERE subscription_id = $1|,
+          [subscription_id]
+        )
+
+      drop_privileges_after_update(context)
+
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
+               SubscriptionFsm.checkpoint(fsm)
+
+      assert_received {:fenced, ^lock_ref}
+    end
+
     test "does not write the position onto a subscription that reused the name", context do
       %{conn: conn, schema: schema, stream_uuid: stream_uuid} = context
       %{subscription_name: subscription_name, subscription_id: subscription_id} = context
@@ -382,7 +407,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     %{subscription_id: subscription_id} = context
 
     data = %SubscriptionState{
-      conn: conn,
+      conn: Keyword.get(overrides, :conn, conn),
       schema: Keyword.get(overrides, :schema, schema),
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
@@ -402,6 +427,35 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     }
 
     %SubscriptionFsm{state: Keyword.get(overrides, :state, :subscribed), data: data}
+  end
+
+  defp drop_privileges_after_update(%{conn: conn, schema: schema}) do
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        """
+        CREATE FUNCTION fsm_test_drop_privileges() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM set_config('role', 'pg_monitor', false); RETURN NULL; END $$
+        """,
+        []
+      )
+
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        ~s|CREATE TRIGGER fsm_test_drop_privileges AFTER UPDATE ON "#{schema}".subscriptions FOR EACH STATEMENT EXECUTE FUNCTION fsm_test_drop_privileges()|,
+        []
+      )
+
+    on_exit(fn ->
+      Postgrex.query!(
+        conn,
+        ~s|DROP TRIGGER fsm_test_drop_privileges ON "#{schema}".subscriptions|,
+        []
+      )
+
+      Postgrex.query!(conn, "DROP FUNCTION fsm_test_drop_privileges()", [])
+    end)
   end
 
   defp reset_position(context) do
