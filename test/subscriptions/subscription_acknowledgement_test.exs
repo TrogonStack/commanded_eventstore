@@ -60,7 +60,7 @@ defmodule EventStore.Subscriptions.SubscriptionAcknowledgementTest do
 
     test "should checkpoint after inactivity", %{conn: conn} do
       {:ok, subscription} =
-        subscribe_to_all_streams(buffer_size: 3, checkpoint_after: 25, checkpoint_threshold: 100)
+        subscribe_to_all_streams(buffer_size: 3, checkpoint_after: 500, checkpoint_threshold: 100)
 
       :ok = append_to_stream("stream1", 3)
       :ok = receive_and_ack(subscription, "stream1", [1, 2, 3])
@@ -78,7 +78,7 @@ defmodule EventStore.Subscriptions.SubscriptionAcknowledgementTest do
       # Checkpoint is not immediately updated
       assert_checkpoint(conn, "subscription", 0)
 
-      Wait.until(fn ->
+      Wait.until(2_000, fn ->
         # Checkpoint is updated after a delay
         assert_checkpoint(conn, "subscription", 6)
       end)

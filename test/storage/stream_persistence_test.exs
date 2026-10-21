@@ -22,10 +22,13 @@ defmodule EventStore.Storage.StreamPersistenceTest do
   test "stream info for stream with no events", %{conn: conn, schema: schema} do
     stream_uuid = UUID.uuid4()
 
+    before = DateTime.utc_now()
     {:ok, stream_id} = CreateStream.execute(conn, stream_uuid, schema: schema)
 
     assert {:ok, %StreamInfo{created_at: created_at} = stream_info} =
              Stream.stream_info(conn, stream_uuid, schema: schema)
+
+    after_create = DateTime.utc_now()
 
     assert match?(
              %StreamInfo{
@@ -39,7 +42,8 @@ defmodule EventStore.Storage.StreamPersistenceTest do
              stream_info
            )
 
-    assert DateTime.diff(DateTime.utc_now(), created_at, :millisecond) <= 20
+    assert DateTime.compare(created_at, before) != :lt
+    assert DateTime.compare(created_at, after_create) != :gt
   end
 
   test "stream info for stream with one event", %{conn: conn, schema: schema} = context do
