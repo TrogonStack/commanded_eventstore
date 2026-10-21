@@ -76,14 +76,10 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     )
   end
 
-  # Leaves A without its lock and fenced by B, which owns the subscription at event 5.
   defp fence_a(subscription_a, subscription_name, conn, schema, proxy) do
     assert_receive {:subscribed, ^subscription_a}
 
-    :ok =
-      TestEventStore.append_to_stream(UUID.uuid4(), 0, EventFactory.create_events(7),
-        name: @store_a
-      )
+    append_to_a(7)
 
     assert_receive_through(7)
 
@@ -91,6 +87,18 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
 
     Wait.until(fn -> assert 3 == last_seen(conn, schema, subscription_name) end)
 
+    take_over(subscription_name, conn, schema, proxy)
+  end
+
+  defp append_to_a(count) do
+    :ok =
+      TestEventStore.append_to_stream(UUID.uuid4(), 0, EventFactory.create_events(count),
+        name: @store_a
+      )
+  end
+
+  # Takes A's lock session away and has B own the subscription at event 5.
+  defp take_over(subscription_name, conn, schema, proxy) do
     lock_pool = Module.concat([@store_a, EventStore.AdvisoryLocks, Postgrex])
 
     %Postgrex.Result{rows: [[backend_pid]]} =
@@ -110,7 +118,7 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
                )
     end)
 
-    subscriber_b = start_forwarding_subscriber()
+    subscriber_b = start_forwarding_subscriber(:b)
 
     {:ok, subscription_b} =
       TestEventStore.subscribe_to_all_streams(subscription_name, subscriber_b,
@@ -118,8 +126,8 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
         buffer_size: 10
       )
 
-    assert_receive {:b_subscribed, ^subscription_b}, 5_000
-    assert_receive {:b_events, [%{event_number: 4} | _]}, 5_000
+    assert_receive {:b, :subscribed, ^subscription_b}, 5_000
+    assert_receive {:b, :events, [%{event_number: 4} | _]}, 5_000
 
     send(subscriber_b, {:ack, subscription_b, 5})
 
@@ -128,6 +136,55 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     flush_events()
 
     {subscription_b, subscriber_b}
+  end
+
+  test "every subscriber of a fenced subscription stops receiving events",
+       %{conn: conn, schema: schema, proxy: proxy, subscription_name: subscription_name} do
+    subscriber_1 = start_forwarding_subscriber(:a1)
+    subscriber_2 = start_forwarding_subscriber(:a2)
+
+    {:ok, subscription_a} = subscribe_a(subscription_name, subscriber_1, concurrency_limit: 2)
+    {:ok, ^subscription_a} = subscribe_a(subscription_name, subscriber_2, concurrency_limit: 2)
+
+    assert_receive {:a1, :subscribed, ^subscription_a}
+    assert_receive {:a2, :subscribed, ^subscription_a}
+
+    append_to_a(7)
+
+    owners = receive_owners(%{a1: subscriber_1, a2: subscriber_2}, 7)
+
+    ack_in_order(owners, subscription_a, 1..3)
+
+    Wait.until(fn -> assert 3 == last_seen(conn, schema, subscription_name) end)
+
+    take_over(subscription_name, conn, schema, proxy)
+
+    ack_in_order(owners, subscription_a, 4..7)
+
+    Wait.until(fn -> assert :disconnected == subscription_state(subscription_a) end)
+
+    assert 5 == last_seen(conn, schema, subscription_name)
+
+    refute_receive {:a1, :events, _events}, 500
+    refute_receive {:a2, :events, _events}, 0
+  end
+
+  defp ack_in_order(owners, subscription, event_numbers) do
+    for event_number <- event_numbers do
+      send(Map.fetch!(owners, event_number), {:ack, subscription, event_number})
+    end
+  end
+
+  defp receive_owners(subscribers, last, acc \\ %{}) do
+    receive do
+      {tag, :events, events} when tag in [:a1, :a2] ->
+        acc =
+          Enum.reduce(events, acc, &Map.put(&2, &1.event_number, Map.fetch!(subscribers, tag)))
+
+        if map_size(acc) >= last, do: acc, else: receive_owners(subscribers, last, acc)
+    after
+      2_000 -> acc
+    end
   end
 
   defp assert_receive_through(last_event_number) do
@@ -146,20 +203,20 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     end
   end
 
-  defp start_forwarding_subscriber do
+  defp start_forwarding_subscriber(tag) do
     reply_to = self()
 
-    spawn_link(fn -> forward(reply_to) end)
+    spawn_link(fn -> forward(tag, reply_to) end)
   end
 
-  defp forward(reply_to) do
+  defp forward(tag, reply_to) do
     receive do
-      {:subscribed, subscription} -> send(reply_to, {:b_subscribed, subscription})
-      {:events, events} -> send(reply_to, {:b_events, events})
+      {:subscribed, subscription} -> send(reply_to, {tag, :subscribed, subscription})
+      {:events, events} -> send(reply_to, {tag, :events, events})
       {:ack, subscription, event_number} -> TestEventStore.ack(subscription, event_number)
     end
 
-    forward(reply_to)
+    forward(tag, reply_to)
   end
 
   defp subscription_state(subscription) do
