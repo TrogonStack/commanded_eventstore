@@ -1,6 +1,8 @@
 defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   use EventStore.StorageCase
 
+  import ExUnit.CaptureLog
+
   alias EventStore.{Config, EventFactory, Storage, UUID, Wait}
   alias EventStore.Subscriptions.{FencingToken, Subscription}
 
@@ -219,6 +221,58 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
 
       assert_receive_events([1, 2, 3])
     end
+  end
+
+  describe "subscription stopped after another owner took over" do
+    test "should leave the progress of the new owner untouched", %{
+      conn: conn,
+      event_store: event_store,
+      schema: schema,
+      subscription_name: subscription_name
+    } do
+      {:ok, subscription} =
+        event_store.subscribe_to_all_streams(subscription_name, self(),
+          buffer_size: 3,
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+
+      Postgrex.query!(
+        conn,
+        "UPDATE \"#{schema}\".subscriptions SET lock_generation = lock_generation + 1, last_seen = 2 WHERE subscription_name = $1",
+        [subscription_name]
+      )
+
+      :ok = Subscription.ack(subscription, 3)
+
+      monitor_ref = Process.monitor(subscription)
+
+      log =
+        capture_log(fn ->
+          assert :ok = GenServer.stop(subscription)
+        end)
+
+      assert_receive {:DOWN, ^monitor_ref, :process, ^subscription, :normal}
+      refute log =~ "terminating"
+
+      assert 2 == last_seen(conn, schema, subscription_name)
+    end
+  end
+
+  defp last_seen(conn, schema, subscription_name) do
+    %Postgrex.Result{rows: [[last_seen]]} =
+      Postgrex.query!(
+        conn,
+        "SELECT last_seen FROM \"#{schema}\".subscriptions WHERE subscription_name = $1",
+        [subscription_name]
+      )
+
+    last_seen
   end
 
   defp lock_subscription(context) do
