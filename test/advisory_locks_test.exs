@@ -216,6 +216,29 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
     end
+
+    test "should not crash a claim the busy lock server cannot answer in time", context do
+      %{subscription_id: held_id} = create_subscription(context)
+
+      {:ok, %AdvisoryLocks.Lease{ref: ref}} = AdvisoryLocks.try_subscription_lock(@locks, held_id)
+
+      other = create_subscription(context, "other_subscription")
+
+      holder = hold_only_connection()
+
+      try do
+        :ok = AdvisoryLocks.release(@locks, ref)
+
+        wait_until_waiting_for_connection()
+
+        assert {:error, :timeout} =
+                 AdvisoryLocks.try_subscription_lock(@locks, other.subscription_id, 300)
+      after
+        send(holder, :release)
+      end
+
+      _state = :sys.get_state(@locks, 5_000)
+    end
   end
 
   describe "release lock" do
@@ -690,9 +713,9 @@ defmodule EventStore.AdvisoryLocksTest do
 
   defp lock_pool_pid, do: Process.whereis(@conn)
 
-  defp create_subscription(%{conn: conn, schema: schema}) do
+  defp create_subscription(%{conn: conn, schema: schema}, name \\ "test_subscription") do
     {:ok, %Storage.Subscription{} = subscription} =
-      Storage.subscribe_to_stream(conn, "$all", "test_subscription", schema: schema)
+      Storage.subscribe_to_stream(conn, "$all", name, schema: schema)
 
     subscription
   end
