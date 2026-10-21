@@ -134,6 +134,26 @@ defmodule EventStore.AdvisoryLocksTest do
       end)
     end
 
+    test "should free a subscription lock for another session", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %AdvisoryLocks.Lease{ref: ref}} =
+        AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      assert :ok = AdvisoryLocks.release(@locks, ref)
+
+      _ = :sys.get_state(@locks)
+
+      Wait.until(fn ->
+        assert {:ok, %{token: %{generation: 2}}} =
+                 Storage.Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+      end)
+    end
+
     test "should keep the key held for another owner of the same key",
          %{conn: conn, schema: schema} do
       reply_to = self()
