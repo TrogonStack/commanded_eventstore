@@ -103,6 +103,58 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     assert :subscribed == subscription_state(subscription_b)
   end
 
+  test "a subscription fenced while catching up disconnects and the new owner resumes from the committed position",
+       %{conn: conn, schema: schema, proxy: proxy, subscription_name: subscription_name} do
+    for _ <- 1..4, do: append_to_a(50)
+
+    {:ok, subscription_a} = subscribe_a(subscription_name, self(), buffer_size: 1)
+
+    assert_receive {:subscribed, ^subscription_a}
+
+    for event_number <- 1..3 do
+      assert_receive {:events, [%{event_number: ^event_number}]}, 5_000
+
+      :ok = TestEventStore.ack(subscription_a, event_number)
+    end
+
+    assert_receive {:events, [%{event_number: 4}]}, 5_000
+
+    Wait.until(fn -> assert 3 == last_seen(conn, schema, subscription_name) end)
+
+    refute :subscribed == subscription_state(subscription_a)
+
+    monitor = Process.monitor(subscription_a)
+
+    {subscription_b, subscriber_b} = take_over(subscription_name, conn, schema, proxy)
+
+    :ok = TestEventStore.ack(subscription_a, 4)
+
+    Wait.until(fn -> assert :disconnected == subscription_state(subscription_a) end)
+
+    assert 5 == last_seen(conn, schema, subscription_name)
+
+    flush_events()
+
+    for event_number <- 6..12 do
+      send(subscriber_b, {:ack, subscription_b, event_number})
+    end
+
+    assert_receive_b_through(15)
+
+    refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 500
+    refute_receive {:events, _events}, 500
+
+    Wait.until(fn -> assert 12 == last_seen(conn, schema, subscription_name) end)
+  end
+
+  defp assert_receive_b_through(last_event_number) do
+    assert_receive {:b, :events, events}, 5_000
+
+    unless List.last(events).event_number >= last_event_number do
+      assert_receive_b_through(last_event_number)
+    end
+  end
+
   defp subscribe_a(subscription_name, subscriber, opts \\ []) do
     TestEventStore.subscribe_to_all_streams(
       subscription_name,
