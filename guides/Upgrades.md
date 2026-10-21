@@ -2,6 +2,10 @@
 
 The [CHANGELOG](https://github.com/commanded/eventstore/blob/master/CHANGELOG.md) is used to indicate when a schema migration is required for a given version of the EventStore.
 
+## Migrate before rolling nodes
+
+Run the migration before starting nodes on the new version. A node on a version that expects a newer schema cannot acquire subscription locks against an unmigrated database and keeps retrying until the migration has run. Nodes on the previous version keep working against the migrated schema, so a rolling upgrade is safe once the migration is in place.
+
 ## Migrating a database with `mix`
 
 You can upgrade an existing EventStore database using the following mix task:
