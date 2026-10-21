@@ -151,6 +151,8 @@ defmodule EventStore.AdvisoryLocks do
           {:ok, reference()} | {:error, :lock_already_taken} | {:error, term}
   def try_advisory_lock(server, key, timeout \\ 5_000) when is_integer(key) do
     GenServer.call(server, {:try_advisory_lock, key, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
   end
 
   @doc """
@@ -170,6 +172,8 @@ defmodule EventStore.AdvisoryLocks do
   def try_subscription_lock(server, subscription_id, timeout \\ 5_000)
       when is_integer(subscription_id) do
     GenServer.call(server, {:try_subscription_lock, subscription_id, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
   end
 
   @doc """
