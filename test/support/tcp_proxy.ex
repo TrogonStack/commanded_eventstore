@@ -13,6 +13,12 @@ defmodule EventStore.TcpProxy do
   """
   def blackhole(proxy), do: GenServer.call(proxy, :blackhole)
 
+  @doc """
+  Pipes new connections again and closes the ones held open by `blackhole/1`
+  so their clients fail fast and reconnect.
+  """
+  def forward(proxy), do: GenServer.call(proxy, :forward)
+
   def stop(proxy), do: GenServer.stop(proxy)
 
   @impl GenServer
@@ -24,13 +30,22 @@ defmodule EventStore.TcpProxy do
     proxy = self()
     acceptor = spawn_link(fn -> accept(listen, proxy, to_charlist(host), port) end)
 
-    {:ok, %{acceptor: acceptor, listen: listen, port: listen_port, mode: :forward}}
+    {:ok, %{acceptor: acceptor, listen: listen, port: listen_port, mode: :forward, held: []}}
   end
 
   @impl GenServer
   def handle_call(:port, _from, state), do: {:reply, state.port, state}
   def handle_call(:mode, _from, state), do: {:reply, state.mode, state}
   def handle_call(:blackhole, _from, state), do: {:reply, :ok, %{state | mode: :blackhole}}
+
+  def handle_call({:hold, client}, _from, state),
+    do: {:reply, :ok, %{state | held: [client | state.held]}}
+
+  def handle_call(:forward, _from, state) do
+    Enum.each(state.held, &:gen_tcp.close/1)
+
+    {:reply, :ok, %{state | mode: :forward, held: []}}
+  end
 
   @impl GenServer
   def terminate(_reason, %{acceptor: acceptor, listen: listen}) do
@@ -42,13 +57,21 @@ defmodule EventStore.TcpProxy do
   defp accept(listen, proxy, host, port) do
     case :gen_tcp.accept(listen) do
       {:ok, client} ->
-        if GenServer.call(proxy, :mode) == :forward, do: pipe(client, host, port)
+        case GenServer.call(proxy, :mode) do
+          :forward -> pipe(client, host, port)
+          :blackhole -> hold(client, proxy)
+        end
 
         accept(listen, proxy, host, port)
 
       {:error, _reason} ->
         :ok
     end
+  end
+
+  defp hold(client, proxy) do
+    :ok = :gen_tcp.controlling_process(client, proxy)
+    :ok = GenServer.call(proxy, {:hold, client})
   end
 
   defp pipe(client, host, port) do
