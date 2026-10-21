@@ -50,7 +50,8 @@ defmodule EventStore.Mixfile do
       # Development and test tooling
       {:benchfella, "~> 0.3", only: :bench},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
-      {:ex_doc, ">= 0.0.0", only: :dev}
+      {:ex_doc, ">= 0.0.0", only: :dev},
+      {:stream_data, "~> 1.1", only: [:test, :jsonb, :text_ids, :migration]}
     ]
   end
 
