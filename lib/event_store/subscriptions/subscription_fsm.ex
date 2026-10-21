@@ -109,12 +109,14 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       %AdvisoryLocks.Lease{ref: lock_ref, token: token, last_seen: last_seen} = lease
 
       last_ack = last_seen || 0
+      %SubscriptionState{last_received: last_received} = data
 
       data = %SubscriptionState{
         data
         | subscription_id: subscription_id,
           lock_ref: lock_ref,
           fencing_token: token,
+          last_received: max(last_received, last_ack),
           last_sent: last_ack,
           last_ack: last_ack
       }

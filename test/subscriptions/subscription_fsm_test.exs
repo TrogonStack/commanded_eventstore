@@ -329,6 +329,24 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       assert data.last_received == 15
     end
+
+    test "does not move last_received backwards when events past the stored position were seen",
+         context do
+      reclaim_after_other_owner_acked(context, appended: 20, stored: 15)
+
+      fsm = fsm(context, state: :disconnected, last_received: 20, last_sent: 5, last_ack: 5)
+
+      assert %SubscriptionFsm{state: :request_catch_up, data: data} =
+               SubscriptionFsm.subscribe(fsm)
+
+      assert data.last_received == 20
+
+      assert %SubscriptionFsm{state: :catching_up, data: data} =
+               SubscriptionFsm.catch_up(%SubscriptionFsm{state: :request_catch_up, data: data})
+
+      assert data.queue_size == 5
+      assert data.last_received == 20
+    end
   end
 
   defp reclaim_after_other_owner_acked(context, appended: appended, stored: stored) do
