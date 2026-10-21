@@ -88,6 +88,51 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     ProcessHelper.shutdown(other)
   end
 
+  test "a claim that fails after taking the advisory lock leaves the subscription claimable",
+       context do
+    %{postgrex_config: postgrex_config, conn: conn, schema: schema} = context
+    %{subscription_id: subscription_id} = create_subscription(context)
+
+    claiming_conn =
+      start_supervised!(
+        {Postgrex,
+         Keyword.merge(postgrex_config, parameters: [lock_timeout: "200ms"], pool_size: 1)},
+        id: :claiming_conn
+      )
+
+    test_pid = self()
+
+    holder =
+      Task.async(fn ->
+        Postgrex.transaction(conn, fn holder_conn ->
+          Postgrex.query!(
+            holder_conn,
+            "SELECT subscription_id FROM \"#{schema}\".subscriptions WHERE subscription_id = $1 FOR UPDATE",
+            [subscription_id]
+          )
+
+          send(test_pid, :row_locked)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :row_locked
+
+    assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} =
+             Lock.claim_subscription_lock(claiming_conn, subscription_id, schema: schema)
+
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
+
+    assert {:ok, %Lock.Lease{}} =
+             Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    assert :ok = Lock.unlock(conn, subscription_id, schema: schema)
+  end
+
   defp create_subscription(%{conn: conn, schema: schema}) do
     {:ok, %Storage.Subscription{} = subscription} =
       Storage.subscribe_to_stream(conn, @all_stream, @subscription_name, schema: schema)
