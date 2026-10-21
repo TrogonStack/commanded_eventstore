@@ -68,6 +68,41 @@ defmodule EventStore.Subscriptions.SubscriptionFencingTest do
     Wait.until(fn -> assert 7 == last_seen(conn, schema, subscription_name) end)
   end
 
+  test "a fenced subscription that keeps retrying does not disturb the new owner",
+       %{conn: conn, schema: schema, proxy: proxy, subscription_name: subscription_name} do
+    {:ok, subscription_a} = subscribe_a(subscription_name, self())
+
+    {subscription_b, subscriber_b} =
+      fence_a(subscription_a, subscription_name, conn, schema, proxy)
+
+    :ok = TestEventStore.ack(subscription_a, 7)
+
+    Wait.until(fn -> assert :disconnected == subscription_state(subscription_a) end)
+
+    :timer.sleep(3_500)
+
+    # While its lock pool is unreachable the subscription may sit inside a
+    # bounded lock claim, so only the database is probed here.
+    assert 2 == lock_generation(conn, schema, subscription_name)
+    assert 5 == last_seen(conn, schema, subscription_name)
+    refute_received {:events, _events}
+
+    :ok = TcpProxy.forward(proxy)
+
+    :timer.sleep(3_500)
+
+    Wait.until(10_000, fn -> assert :disconnected == subscription_state(subscription_a) end)
+    assert 2 == lock_generation(conn, schema, subscription_name)
+    assert 5 == last_seen(conn, schema, subscription_name)
+    refute_received {:events, _events}
+
+    send(subscriber_b, {:ack, subscription_b, 6})
+
+    Wait.until(fn -> assert 6 == last_seen(conn, schema, subscription_name) end)
+
+    assert :subscribed == subscription_state(subscription_b)
+  end
+
   defp subscribe_a(subscription_name, subscriber, opts \\ []) do
     TestEventStore.subscribe_to_all_streams(
       subscription_name,
