@@ -1,6 +1,4 @@
 SELECT pg_try_advisory_lock(
   '"<%= schema %>".subscriptions'::regclass::oid::int,
   (CASE WHEN $1 > 2147483647 THEN mod($1, 2147483647) ELSE $1 END)::int
-), pid, backend_start
-FROM pg_stat_activity
-WHERE pid = pg_backend_pid();
+);
