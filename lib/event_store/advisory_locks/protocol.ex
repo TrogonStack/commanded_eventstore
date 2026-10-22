@@ -1,8 +1,9 @@
 defmodule EventStore.AdvisoryLocks.Protocol do
   @moduledoc false
 
-  # Postgrex closes a connection by sending a cancel request first, which can
-  # take as long as the connection timeout when the database stops answering.
+  # Postgrex closes a connection by sending a cancel request first, and both its
+  # connect and its wait for the reply use the :timeout option, so this can take
+  # that long when the database stops answering.
   # The lock owners cannot wait that long to hear the session is gone.
 
   @behaviour DBConnection
