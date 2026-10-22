@@ -3,7 +3,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
   import ExUnit.CaptureLog
 
-  alias EventStore.{AdvisoryLocks, Config, Wait}
+  alias EventStore.{AdvisoryLocks, Config, MonitoredServer, Wait}
   alias EventStore.Storage
 
   @locks TestEventStore.EventStore.AdvisoryLocks
@@ -256,6 +256,40 @@ defmodule EventStore.AdvisoryLocksTest do
     test "should acquire lock", %{conn1: conn1, conn2: conn2, schema1: schema1, schema2: schema2} do
       :ok = Storage.Lock.try_acquire_exclusive_lock(conn1, 1, schema: schema1)
       :ok = Storage.Lock.try_acquire_exclusive_lock(conn2, 1, schema: schema2)
+    end
+  end
+
+  describe "lock connection that switches role after connecting" do
+    test "should acquire lock and keep running" do
+      locks_name = Module.concat([__MODULE__, SwitchedRole, AdvisoryLocks])
+      conn_name = Module.concat([locks_name, Postgrex])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      postgrex_config =
+        config
+        |> Config.advisory_locks_postgrex_opts()
+        |> Config.add_connection_listener(locks_name)
+        |> Keyword.put(:after_connect, {Postgrex, :query!, ["SET ROLE pg_signal_backend", []]})
+
+      start_supervised!(
+        {MonitoredServer,
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: conn_name, backoff_min: 30_000},
+        id: conn_name
+      )
+
+      locks =
+        start_supervised!(
+          {AdvisoryLocks,
+           conn: conn_name,
+           query_timeout: Keyword.fetch!(config, :timeout),
+           schema: "public",
+           name: locks_name}
+        )
+
+      assert {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+      assert is_reference(lock)
+      assert Process.alive?(locks)
     end
   end
 
