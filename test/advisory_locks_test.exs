@@ -455,20 +455,38 @@ defmodule EventStore.AdvisoryLocksTest do
 
         assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_000
       after
-        EventStore.TcpProxy.stop(proxy)
+        stop_supervised!(EventStore.TcpProxy)
       end
     end
 
-    test "should keep a lock acquired while the lost connection is still closing when its disconnect notice arrives" do
+    test "should keep a lock acquired while the lost connection is still closing and unlock it when its owner exits",
+         %{conn: conn, schema: schema} do
       lock_connection = lock_connection_pid()
 
       send(@locks, {AdvisoryLocks, :session_lost, lock_connection})
 
-      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+      owner = start_lock_owner(1)
+
+      assert_receive {:owner_acquired, ^owner, {:ok, lock}}, 1_000
 
       send(@locks, {:disconnected, lock_connection})
 
-      refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+      # The lock server has handled the notice once it answers, and the owner forwards
+      # its messages in order, so the probe arrives after any notification the notice sent.
+      :sys.get_state(@locks)
+      send(owner, :probe)
+      assert_receive {:owner_notified, ^owner, :probe}, 1_000
+
+      refute_received {:owner_notified, ^owner, {AdvisoryLocks, :lock_released, ^lock, _reason}}
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      Process.exit(owner, :kill)
+
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
     end
 
     test "should unlock a lock reported lost while its session is still alive",
@@ -874,6 +892,25 @@ defmodule EventStore.AdvisoryLocksTest do
       Wait.until(5_000, fn ->
         assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
       end)
+    end
+  end
+
+  defp start_lock_owner(key) do
+    test_process = self()
+
+    spawn(fn ->
+      send(test_process, {:owner_acquired, self(), AdvisoryLocks.try_advisory_lock(@locks, key)})
+
+      forward_to_test_process(test_process)
+    end)
+  end
+
+  defp forward_to_test_process(test_process) do
+    receive do
+      message ->
+        send(test_process, {:owner_notified, self(), message})
+
+        forward_to_test_process(test_process)
     end
   end
 
