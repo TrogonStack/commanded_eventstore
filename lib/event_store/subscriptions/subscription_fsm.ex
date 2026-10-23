@@ -313,6 +313,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %__MODULE__{fsm | state: :disconnected, data: data}
   end
 
+  def disconnect(%__MODULE__{} = fsm, _lock_ref), do: fsm
+
   def unsubscribe(
         %__MODULE__{state: :unsubscribed, data: %SubscriptionState{}} = fsm,
         _subscriber
