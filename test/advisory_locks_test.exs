@@ -156,6 +156,32 @@ defmodule EventStore.AdvisoryLocksTest do
       end)
     end
 
+    test "should unlock a lock reported lost once a session that could not be verified answers",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      send(@locks, {:connected, lock_connection})
+      send(@locks, {:disconnected, lock_connection})
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, :session_ended}
+
+      # The session still holds the lock but cannot answer the verification query,
+      # and it never disconnects, so nothing else would retry the pending unlock.
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+      :sys.get_state(@locks)
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+
+      Wait.until(5_000, fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
     test "should send `lock_released` message when the lock connection crashes" do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
