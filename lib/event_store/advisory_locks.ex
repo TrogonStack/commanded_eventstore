@@ -59,6 +59,28 @@ defmodule EventStore.AdvisoryLocks do
     def held_by?(%Lock{session: session}, %Session{} = current), do: session == current
   end
 
+  defmodule Lease do
+    @moduledoc false
+
+    alias EventStore.Storage.Lock.Lease, as: StorageLease
+    alias EventStore.Storage.Session
+    alias EventStore.Subscriptions.FencingToken
+
+    @type t :: %Lease{
+            ref: reference(),
+            token: FencingToken.t(),
+            last_seen: non_neg_integer() | nil,
+            session: Session.t()
+          }
+    defstruct [:ref, :token, :last_seen, :session]
+
+    def new(ref, %StorageLease{} = lease) do
+      %StorageLease{token: token, last_seen: last_seen, session: session} = lease
+
+      %Lease{ref: ref, token: token, last_seen: last_seen, session: session}
+    end
+  end
+
   defmodule Connection do
     @moduledoc false
 
@@ -79,7 +101,7 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   alias DBConnection.ConnectionError
-  alias EventStore.AdvisoryLocks.{Connection, Lock, State}
+  alias EventStore.AdvisoryLocks.{Connection, Lease, Lock, State}
   alias EventStore.Storage
   alias EventStore.Storage.Session
 
@@ -129,6 +151,52 @@ defmodule EventStore.AdvisoryLocks do
           {:ok, reference()} | {:error, :lock_already_taken} | {:error, term}
   def try_advisory_lock(server, key, timeout \\ 5_000) when is_integer(key) do
     GenServer.call(server, {:try_advisory_lock, key, self(), timeout}, timeout)
+  end
+
+  @doc """
+  Attempt to obtain the advisory lock of a subscription, recording the new lock
+  owner on the subscription row.
+
+  Returns `{:ok, lease}` when the lock is acquired, `{:error, :lock_already_taken}`
+  if it cannot be acquired immediately, or `{:error, :subscription_not_found}`
+  when the subscription no longer exists. The lock is released and lost the same
+  way as the one returned by `try_advisory_lock/3`, identified by `lease.ref`.
+  """
+  @spec try_subscription_lock(server :: GenServer.server(), pos_integer(), timeout()) ::
+          {:ok, Lease.t()}
+          | {:error, :lock_already_taken}
+          | {:error, :subscription_not_found}
+          | {:error, term}
+  def try_subscription_lock(server, subscription_id, timeout \\ 5_000)
+      when is_integer(subscription_id) do
+    GenServer.call(server, {:try_subscription_lock, subscription_id, self(), timeout}, timeout)
+  end
+
+  def handle_call(
+        {:try_subscription_lock, subscription_id, owner, timeout},
+        _from,
+        %State{} = state
+      ) do
+    %State{schema: schema} = state
+
+    claim =
+      query(state, fn conn ->
+        Storage.Lock.claim_subscription_lock(conn, subscription_id,
+          schema: schema,
+          timeout: timeout
+        )
+      end)
+
+    case claim do
+      {:ok, %Storage.Lock.Lease{session: session} = lease} ->
+        lock = Lock.new(subscription_id, owner, session)
+        state = monitor_acquired_lock(lock, state)
+
+        {:reply, {:ok, Lease.new(Lock.ref(lock), lease)}, state}
+
+      reply ->
+        {:reply, reply, state}
+    end
   end
 
   def handle_call({:try_advisory_lock, key, owner, timeout}, _from, %State{} = state) do

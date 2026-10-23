@@ -42,6 +42,84 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "acquire subscription lock" do
+    test "should acquire the lock and record the lock owner", context do
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      assert {:ok, %AdvisoryLocks.Lease{} = lease} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      assert is_reference(lease.ref)
+      assert lease.token == EventStore.Subscriptions.FencingToken.new(subscription_id, 1)
+      assert lease.last_seen == nil
+    end
+
+    test "should record a new lock owner each time the lock is acquired", context do
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      assert {:ok, %{token: %{generation: 1}}} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      assert {:ok, %{token: %{generation: 2}}} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+    end
+
+    test "should fail to acquire the lock when another session holds it", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      assert {:ok, _lease} =
+               Storage.Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      assert {:error, :lock_already_taken} =
+               AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+    end
+
+    test "should fail to acquire the lock of a subscription that does not exist" do
+      assert {:error, :subscription_not_found} =
+               AdvisoryLocks.try_subscription_lock(@locks, 999_999)
+    end
+
+    test "should send `lock_released` message with the lease reference", context do
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %{ref: ref}} = AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      shutdown_database_connection()
+
+      assert_receive({AdvisoryLocks, :lock_released, ^ref, :shutdown})
+    end
+
+    test "should release the lock when the owner terminates", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+      reply_to = self()
+
+      pid =
+        spawn_link(fn ->
+          {:ok, _lease} = AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+          send(reply_to, :lock_acquired)
+
+          receive do
+            :shutdown -> :ok
+          end
+        end)
+
+      assert_receive :lock_acquired
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
+
+      send(pid, :shutdown)
+
+      Wait.until(fn ->
+        assert :ok =
+                 Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
+      end)
+    end
+  end
+
   describe "release lock" do
     test "should release lock when process terminates", %{conn: conn, schema: schema} do
       reply_to = self()
@@ -540,4 +618,11 @@ defmodule EventStore.AdvisoryLocksTest do
   end
 
   defp lock_pool_pid, do: Process.whereis(@conn)
+
+  defp create_subscription(%{conn: conn, schema: schema}) do
+    {:ok, %Storage.Subscription{} = subscription} =
+      Storage.subscribe_to_stream(conn, "$all", "test_subscription", schema: schema)
+
+    subscription
+  end
 end

@@ -233,7 +233,8 @@ defmodule EventStore.Sql.Init do
         stream_uuid text NOT NULL,
         subscription_name text NOT NULL,
         last_seen bigint NULL,
-        created_at timestamp with time zone DEFAULT NOW() NOT NULL
+        created_at timestamp with time zone DEFAULT NOW() NOT NULL,
+        lock_generation bigint DEFAULT 0 NOT NULL
     );
     """
   end
@@ -276,7 +277,7 @@ defmodule EventStore.Sql.Init do
   defp record_event_store_schema_version do
     """
     INSERT INTO schema_migrations (major_version, minor_version, patch_version)
-    VALUES (1, 3, 2);
+    VALUES (1, 5, 0);
     """
   end
 end
