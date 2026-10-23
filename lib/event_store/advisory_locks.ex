@@ -11,9 +11,20 @@ defmodule EventStore.AdvisoryLocks do
 
   alias EventStore.MonitoredServer
 
+  @verify_retry 1_000
+
   defmodule State do
     @moduledoc false
-    defstruct [:conn, :connection, :query_timeout, :ref, :schema, locks: %{}, released: []]
+    defstruct [
+      :conn,
+      :connection,
+      :query_timeout,
+      :ref,
+      :schema,
+      :verify_timer,
+      locks: %{},
+      released: []
+    ]
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
@@ -155,8 +166,13 @@ defmodule EventStore.AdvisoryLocks do
 
     notify_lost_locks(locks, reason)
 
-    {:noreply, %State{state | connection: nil, locks: %{}, released: []}}
+    {:noreply, %State{state | connection: nil, locks: %{}, released: [], verify_timer: nil}}
   end
+
+  # A session that could not be verified never reported a disconnect, so the
+  # pending unlocks are reconciled again once it can answer.
+  def handle_info(:verify_sessions, %State{} = state),
+    do: {:noreply, verify_sessions(%State{state | verify_timer: nil})}
 
   # The connection pool outlives its connections, so a reconnect replaces the
   # session that held the locks without the pool going down.
@@ -238,17 +254,28 @@ defmodule EventStore.AdvisoryLocks do
 
         notify_lost_locks(lost, :session_ended)
 
-        for %Lock{key: key} = lock <- released, Lock.held_by?(lock, session) do
-          release_lock(key, state)
-        end
+        # A lock whose session has ended died with it, but one still held by this
+        # session is only cleared once its unlock is acknowledged.
+        pending =
+          for %Lock{key: key} = lock <- released,
+              Lock.held_by?(lock, session),
+              release_lock(key, state) != :ok,
+              do: lock
 
-        %State{state | locks: held, released: []}
+        schedule_verify_retry(%State{state | locks: held, released: pending})
 
-      # A connection that cannot answer reports its own disconnect.
+      # A failed query does not prove the session ended, so the pending unlocks
+      # are retried until a live session can confirm and release them.
       {:error, _error} ->
-        state
+        schedule_verify_retry(state)
     end
   end
+
+  defp schedule_verify_retry(%State{released: []} = state), do: state
+  defp schedule_verify_retry(%State{verify_timer: ref} = state) when is_reference(ref), do: state
+
+  defp schedule_verify_retry(%State{} = state),
+    do: %State{state | verify_timer: Process.send_after(self(), :verify_sessions, @verify_retry)}
 
   defp notify_lost_locks(locks, _reason) when map_size(locks) == 0, do: :ok
 
