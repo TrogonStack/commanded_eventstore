@@ -11,7 +11,7 @@ defmodule EventStore.Subscriptions.Subscription do
 
   require Logger
 
-  alias EventStore.RecordedEvent
+  alias EventStore.{AdvisoryLocks, RecordedEvent}
   alias EventStore.Subscriptions.{SubscriptionFsm, Subscription, SubscriptionState}
 
   # Mirrors the storage `:timeout` a subscription gives its own queries, for the internal callers
@@ -160,6 +160,27 @@ defmodule EventStore.Subscriptions.Subscription do
     %Subscription{subscription: subscription} = state
 
     Logger.debug(describe(state) <> " advisory lock lost due to: " <> inspect(reason))
+
+    state =
+      subscription
+      |> SubscriptionFsm.disconnect(lock_ref)
+      |> apply_subscription_to_state(state)
+
+    {:noreply, state}
+  end
+
+  @impl GenServer
+  def handle_info({:fenced, lock_ref}, %Subscription{} = state) do
+    %Subscription{
+      subscription: %SubscriptionFsm{data: %SubscriptionState{} = data} = subscription
+    } =
+      state
+
+    %SubscriptionState{event_store: event_store} = data
+
+    Logger.warning(describe(state) <> " lost its lock to another owner, disconnecting")
+
+    :ok = AdvisoryLocks.release(Module.concat(event_store, AdvisoryLocks), lock_ref)
 
     state =
       subscription

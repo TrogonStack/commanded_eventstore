@@ -5,6 +5,7 @@ defmodule EventStore.Storage.Subscription do
 
   alias EventStore.Sql.Statements
   alias EventStore.Storage.Subscription
+  alias EventStore.Subscriptions.FencingToken
 
   alias EventStore.Storage.Subscription.{
     CreateSubscription,
@@ -41,8 +42,8 @@ defmodule EventStore.Storage.Subscription do
     end
   end
 
-  def ack_last_seen_event(conn, subscription_id, last_seen, opts) do
-    Subscription.Ack.execute(conn, subscription_id, last_seen, opts)
+  def ack_last_seen_event(conn, %FencingToken{} = token, last_seen, opts) do
+    Subscription.Ack.execute(conn, token, last_seen, opts)
   end
 
   def delete_subscription(conn, stream_uuid, subscription_name, opts),
@@ -136,24 +137,33 @@ defmodule EventStore.Storage.Subscription do
   defmodule Ack do
     @moduledoc false
 
-    def execute(conn, subscription_id, last_seen, opts) do
+    def execute(conn, %FencingToken{} = token, last_seen, opts) do
+      %FencingToken{subscription_id: subscription_id, generation: generation} = token
+
       {schema, opts} = Keyword.pop(opts, :schema)
 
       query = Statements.subscription_ack(schema)
 
-      case Postgrex.query(conn, query, [subscription_id, last_seen], opts) do
+      case Postgrex.query(conn, query, [subscription_id, last_seen, generation], opts) do
         # Naming the subscription by its identifier, rather than by the stream and name a later
         # subscription can reuse, is what keeps this from writing a checkpoint onto whichever row
         # holds that name now.
-        {:ok, %Postgrex.Result{num_rows: 0}} ->
+        {:ok, %Postgrex.Result{rows: [[true, _present]]}} ->
+          :ok
+
+        {:ok, %Postgrex.Result{rows: [[false, true]]}} ->
+          Logger.warning(
+            "Failed to ack last seen event for subscription #{subscription_id} because another lock owner has claimed it"
+          )
+
+          {:error, :fenced}
+
+        {:ok, %Postgrex.Result{rows: [[false, false]]}} ->
           Logger.warning(
             "Failed to ack last seen event for subscription #{subscription_id} because it no longer exists"
           )
 
           {:error, :subscription_not_found}
-
-        {:ok, _result} ->
-          :ok
 
         {:error, error} = reply ->
           Logger.warning(

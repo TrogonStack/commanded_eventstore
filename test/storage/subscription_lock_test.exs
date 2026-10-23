@@ -38,7 +38,9 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     %{conn: conn, schema: schema} = context
     %{subscription_id: subscription_id} = create_subscription(context)
 
-    :ok = Storage.ack_last_seen_event(conn, subscription_id, 3, schema: schema)
+    {:ok, %{token: token}} = Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    :ok = Storage.ack_last_seen_event(conn, token, 3, schema: schema)
 
     assert {:ok, %{last_seen: 3}} =
              Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
@@ -133,6 +135,50 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     assert :ok = Lock.unlock(conn, subscription_id, schema: schema)
   end
 
+  describe "ack with a fencing token" do
+    test "a stale generation is fenced and leaves the position alone", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %{token: stale}} =
+        Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      {:ok, %{token: current}} =
+        Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      assert :ok = Storage.ack_last_seen_event(conn, current, 3, schema: schema)
+
+      assert {:error, :fenced} = Storage.ack_last_seen_event(conn, stale, 7, schema: schema)
+
+      assert 3 == last_seen(context, subscription_id)
+    end
+
+    test "the current generation is accepted", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %{token: token}} =
+        Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      assert :ok = Storage.ack_last_seen_event(conn, token, 4, schema: schema)
+
+      assert 4 == last_seen(context, subscription_id)
+    end
+
+    test "a subscription that no longer exists is not found rather than fenced", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %{token: token}} =
+        Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+      :ok = Storage.delete_subscription(conn, @all_stream, @subscription_name, schema: schema)
+
+      assert {:error, :subscription_not_found} =
+               Storage.ack_last_seen_event(conn, token, 1, schema: schema)
+    end
+  end
+
   defp create_subscription(%{conn: conn, schema: schema}) do
     {:ok, %Storage.Subscription{} = subscription} =
       Storage.subscribe_to_stream(conn, @all_stream, @subscription_name, schema: schema)
@@ -149,5 +195,16 @@ defmodule EventStore.Storage.SubscriptionLockTest do
       )
 
     generation
+  end
+
+  defp last_seen(%{conn: conn, schema: schema}, subscription_id) do
+    %Postgrex.Result{rows: [[last_seen]]} =
+      Postgrex.query!(
+        conn,
+        "SELECT last_seen FROM \"#{schema}\".subscriptions WHERE subscription_id = $1",
+        [subscription_id]
+      )
+
+    last_seen
   end
 end

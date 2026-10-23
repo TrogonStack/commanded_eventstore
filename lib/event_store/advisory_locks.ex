@@ -40,18 +40,20 @@ defmodule EventStore.AdvisoryLocks do
   defmodule Lock do
     @moduledoc false
 
+    alias EventStore.Storage.Lock.Lease, as: StorageLease
     alias EventStore.Storage.Session
 
     @type t :: %Lock{
             key: non_neg_integer(),
             owner: pid(),
             ref: reference(),
-            session: Session.t()
+            session: Session.t(),
+            lease: StorageLease.t() | nil
           }
-    defstruct [:key, :owner, :ref, :session]
+    defstruct [:key, :owner, :ref, :session, :lease]
 
-    def new(key, owner, %Session{} = session) do
-      %Lock{key: key, owner: owner, ref: make_ref(), session: session}
+    def new(key, owner, %Session{} = session, lease \\ nil) do
+      %Lock{key: key, owner: owner, ref: make_ref(), session: session, lease: lease}
     end
 
     def ref(%Lock{ref: ref}), do: ref
@@ -151,6 +153,8 @@ defmodule EventStore.AdvisoryLocks do
           {:ok, reference()} | {:error, :lock_already_taken} | {:error, term}
   def try_advisory_lock(server, key, timeout \\ 5_000) when is_integer(key) do
     GenServer.call(server, {:try_advisory_lock, key, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
   end
 
   @doc """
@@ -170,6 +174,40 @@ defmodule EventStore.AdvisoryLocks do
   def try_subscription_lock(server, subscription_id, timeout \\ 5_000)
       when is_integer(subscription_id) do
     GenServer.call(server, {:try_subscription_lock, subscription_id, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+  end
+
+  @doc """
+  Release a lock acquired by `try_advisory_lock/3` or `try_subscription_lock/3`
+  before its owner terminates.
+
+  The owner is not sent a `lock_released` message. Releasing a reference that is
+  no longer held succeeds.
+
+  Returns as soon as the request is queued so a caller is never held up by a
+  lock connection that has stopped answering.
+  """
+  @spec release(server :: GenServer.server(), reference()) :: :ok
+  def release(server, ref) when is_reference(ref) do
+    GenServer.cast(server, {:release, ref})
+  end
+
+  def handle_cast({:release, ref}, %State{} = state) do
+    %State{locks: locks} = state
+
+    state =
+      case Enum.find(locks, fn {_owner_ref, lock} -> Lock.ref(lock) == ref end) do
+        nil ->
+          state
+
+        {owner_ref, %Lock{} = lock} ->
+          Process.demonitor(owner_ref, [:flush])
+
+          release_held_lock(lock, %State{state | locks: Map.delete(locks, owner_ref)})
+      end
+
+    {:noreply, state}
   end
 
   def handle_call(
@@ -177,38 +215,64 @@ defmodule EventStore.AdvisoryLocks do
         _from,
         %State{} = state
       ) do
-    %State{schema: schema} = state
-
-    claim =
-      query(state, fn conn ->
-        Storage.Lock.claim_subscription_lock(conn, subscription_id,
-          schema: schema,
-          timeout: timeout
-        )
-      end)
-
-    case claim do
-      {:ok, %Storage.Lock.Lease{session: session} = lease} ->
-        lock = Lock.new(subscription_id, owner, session)
+    case {held_lock(state, subscription_id, owner),
+          claim_subscription_lock(subscription_id, timeout, state)} do
+      {nil, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
+        lock = Lock.new(subscription_id, owner, session, lease)
         state = monitor_acquired_lock(lock, state)
 
         {:reply, {:ok, Lease.new(Lock.ref(lock), lease)}, state}
 
-      reply ->
+      {{owner_ref, %Lock{} = held}, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
+        %Lock{key: key, ref: ref} = held
+        %State{locks: locks} = state
+
+        if Lock.held_by?(held, session), do: release_lock(key, state)
+
+        lock = %Lock{held | session: session, lease: lease}
+
+        {:reply, {:ok, Lease.new(ref, lease)},
+         %State{state | locks: Map.put(locks, owner_ref, lock)}}
+
+      {_held, reply} ->
         {:reply, reply, state}
     end
   end
 
   def handle_call({:try_advisory_lock, key, owner, timeout}, _from, %State{} = state) do
-    case try_acquire_exclusive_lock(key, owner, timeout, state) do
-      {:ok, %Lock{} = lock} ->
-        state = monitor_acquired_lock(lock, state)
-
+    case held_lock(state, key, owner) do
+      {_owner_ref, %Lock{} = lock} ->
         {:reply, {:ok, Lock.ref(lock)}, state}
 
-      reply ->
-        {:reply, reply, state}
+      nil ->
+        case try_acquire_exclusive_lock(key, owner, timeout, state) do
+          {:ok, %Lock{} = lock} ->
+            state = monitor_acquired_lock(lock, state)
+
+            {:reply, {:ok, Lock.ref(lock)}, state}
+
+          reply ->
+            {:reply, reply, state}
+        end
     end
+  end
+
+  defp claim_subscription_lock(subscription_id, timeout, %State{} = state) do
+    %State{schema: schema} = state
+
+    query(state, fn conn ->
+      Storage.Lock.claim_subscription_lock(conn, subscription_id,
+        schema: schema,
+        timeout: timeout
+      )
+    end)
+  end
+
+  defp held_lock(%State{locks: locks}, key, owner) do
+    Enum.find(locks, fn
+      {_owner_ref, %Lock{key: ^key, owner: ^owner}} -> true
+      _other -> false
+    end)
   end
 
   defp try_acquire_exclusive_lock(key, owner, timeout, %State{} = state) do
@@ -371,6 +435,22 @@ defmodule EventStore.AdvisoryLocks do
     end
 
     :ok
+  end
+
+  # An owner holds a key once, so releasing it unlocks that owner's hold and leaves
+  # the holds of every other owner in place.
+  defp release_held_lock(%Lock{key: key} = lock, %State{} = state) do
+    %State{query_timeout: query_timeout, released: released} = state
+
+    case query(state, &Session.current(&1, timeout: query_timeout)) do
+      {:ok, %Session{} = session} ->
+        if Lock.held_by?(lock, session), do: release_lock(key, state)
+
+        state
+
+      {:error, _error} ->
+        %State{state | released: [lock | released]}
+    end
   end
 
   defp release_lock(key, %State{} = state) do

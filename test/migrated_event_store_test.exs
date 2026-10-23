@@ -124,3 +124,58 @@ defmodule EventStore.MigratedEventStoreTest do
     EventStore.Tasks.Migrate.exec(config, quiet: true)
   end
 end
+
+defmodule EventStore.MigratedSubscriptionLockTest do
+  use ExUnit.Case
+
+  alias EventStore.Config
+  alias EventStore.Storage
+  alias EventStore.Subscriptions.FencingToken
+
+  @moduletag :migration
+
+  setup_all do
+    config = TestEventStore.config()
+
+    EventStore.Storage.Database.drop(config)
+    :ok = EventStore.Storage.Database.create(config)
+    {_, 0} = EventStore.Storage.Database.restore(config, "test/fixture/eventstore_seed.dump")
+    EventStore.Tasks.Migrate.exec(config, quiet: true)
+
+    postgrex_config =
+      TestEventStore |> Config.parsed(:eventstore) |> Config.default_postgrex_opts()
+
+    [conn: start_supervised!({Postgrex, postgrex_config})]
+  end
+
+  test "claims the lock of a subscription that existed before the migration", %{conn: conn} do
+    assert [0, 0, 0, 0] == lock_generations(conn)
+
+    assert {:ok, lease} = Storage.Lock.claim_subscription_lock(conn, 2, schema: "public")
+
+    assert lease.last_seen == 100
+    assert lease.token == FencingToken.new(2, 1)
+    assert [0, 1, 0, 0] == lock_generations(conn)
+
+    assert :ok =
+             Storage.Subscription.ack_last_seen_event(conn, lease.token, 101, schema: "public")
+
+    assert %Postgrex.Result{rows: [[101]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT last_seen FROM public.subscriptions WHERE subscription_id = 2",
+               []
+             )
+  end
+
+  defp lock_generations(conn) do
+    %Postgrex.Result{rows: rows} =
+      Postgrex.query!(
+        conn,
+        "SELECT lock_generation FROM public.subscriptions ORDER BY subscription_id",
+        []
+      )
+
+    List.flatten(rows)
+  end
+end
