@@ -293,6 +293,50 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "lock connection that connected before the lock server started" do
+    test "should send `lock_released` message when the lock connection crashes" do
+      locks_name = Module.concat([__MODULE__, ConnectedFirst, AdvisoryLocks])
+      conn_name = Module.concat([locks_name, Postgrex])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      postgrex_config =
+        config
+        |> Config.advisory_locks_postgrex_opts()
+        |> Config.add_connection_listener(locks_name)
+
+      start_supervised!(
+        {MonitoredServer,
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: conn_name, backoff_min: 30_000},
+        id: conn_name
+      )
+
+      # The notice for this connection is sent to a lock server that does not exist yet.
+      first_session = backend_pid(conn_name)
+
+      start_supervised!(
+        {AdvisoryLocks,
+         conn: conn_name,
+         query_timeout: Keyword.fetch!(config, :timeout),
+         schema: "public",
+         name: locks_name}
+      )
+
+      Wait.until(5_000, fn ->
+        refute backend_pid(conn_name) == first_session,
+               "the connection made before the lock server started was not replaced"
+      end)
+
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+
+      without_reconnects(conn_name, fn lock_connection ->
+        Process.exit(lock_connection, :kill)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+      end)
+    end
+  end
+
   defp hold_only_connection do
     %{pid: conn} = Process.whereis(@conn) |> :sys.get_state()
 
@@ -345,8 +389,8 @@ defmodule EventStore.AdvisoryLocksTest do
     end)
   end
 
-  defp without_reconnects(fun) do
-    lock_connection = lock_connection_pid()
+  defp without_reconnects(conn \\ @conn, fun) do
+    lock_connection = lock_connection_pid(conn)
 
     {:dictionary, dictionary} = Process.info(lock_connection, :dictionary)
     [connection_supervisor | _ancestors] = dictionary[:"$ancestors"]
@@ -360,9 +404,8 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
-  defp lock_connection_pid do
-    %Postgrex.Result{rows: [[backend_pid]]} =
-      Postgrex.query!(@conn, "SELECT pg_backend_pid()", [])
+  defp lock_connection_pid(conn \\ @conn) do
+    backend_pid = backend_pid(conn)
 
     Enum.find(Process.list(), fn pid ->
       with {:dictionary, dictionary} <- Process.info(pid, :dictionary),
@@ -374,6 +417,12 @@ defmodule EventStore.AdvisoryLocksTest do
         _ -> false
       end
     end)
+  end
+
+  defp backend_pid(conn) do
+    %Postgrex.Result{rows: [[backend_pid]]} = Postgrex.query!(conn, "SELECT pg_backend_pid()", [])
+
+    backend_pid
   end
 
   defp connection_state(pid) do
