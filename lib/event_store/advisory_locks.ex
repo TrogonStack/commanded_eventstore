@@ -85,6 +85,10 @@ defmodule EventStore.AdvisoryLocks do
 
     {:ok, ref} = MonitoredServer.monitor(conn)
 
+    # A connection made before this server was registered announced itself to
+    # nobody, so it is replaced by one whose notices can be received.
+    :ok = DBConnection.disconnect_all(conn, 0)
+
     {:ok, %State{state | ref: ref}}
   end
 
