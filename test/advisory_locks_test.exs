@@ -708,6 +708,48 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "lock pool down when the lock server starts" do
+    @tag capture_log: true
+    test "should start even when the lock pool is down" do
+      locks_name = Module.concat([__MODULE__, PoolDownAtStart, AdvisoryLocks])
+      conn_name = Module.concat([locks_name, Postgrex])
+      monitor_name = Module.concat([conn_name, MonitoredServer])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      postgrex_config =
+        config
+        |> Config.advisory_locks_postgrex_opts()
+        |> Config.add_connection_listener(locks_name)
+        |> Keyword.put(:name, conn_name)
+
+      start_supervised!(
+        {MonitoredServer,
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
+        id: monitor_name
+      )
+
+      Wait.until(fn -> assert is_pid(Process.whereis(conn_name)) end)
+
+      # The pool is down and its long backoff keeps the name unregistered while the
+      # lock server starts, so the startup disconnect has nothing to call.
+      Process.exit(Process.whereis(conn_name), :kill)
+      Wait.until(fn -> assert is_nil(Process.whereis(conn_name)) end)
+
+      assert {:ok, locks} =
+               start_supervised(
+                 {AdvisoryLocks,
+                  conn: conn_name,
+                  monitor: monitor_name,
+                  query_timeout: Keyword.fetch!(config, :timeout),
+                  schema: "public",
+                  name: locks_name}
+               )
+
+      assert Process.alive?(locks)
+    end
+  end
+
   defp hold_only_connection do
     conn = lock_pool_pid()
 
