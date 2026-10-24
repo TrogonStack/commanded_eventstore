@@ -440,18 +440,8 @@ defmodule EventStore.AdvisoryLocks do
 
   # An owner holds a key once, so releasing it unlocks that owner's hold and leaves
   # the holds of every other owner in place.
-  defp release_held_lock(%Lock{key: key} = lock, %State{} = state) do
-    %State{query_timeout: query_timeout, released: released} = state
-
-    case query(state, &Session.current(&1, timeout: query_timeout)) do
-      {:ok, %Session{} = session} ->
-        if Lock.held_by?(lock, session), do: release_lock(key, state)
-
-        state
-
-      {:error, _error} ->
-        %State{state | released: [lock | released]}
-    end
+  defp release_held_lock(%Lock{} = lock, %State{released: released} = state) do
+    verify_sessions(%State{state | released: [lock | released]})
   end
 
   defp release_lock(key, %State{} = state) do
