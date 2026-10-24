@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.5.0](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.9...v1.5.0) (2026-10-24)
+
+
+### Features
+
+* **config:** Allow tuning pool pings, checkout retries and connection recycling ([#22](https://github.com/TrogonStack/commanded_eventstore/issues/22)) ([19072b4](https://github.com/TrogonStack/commanded_eventstore/commit/19072b4aec0da2eb6e1463f94ef3b9d1f3b427f9))
+
+
+### Bug Fixes
+
+* **subscriptions:** Release advisory locks when the lock connection reconnects on a new session ([#24](https://github.com/TrogonStack/commanded_eventstore/issues/24)) ([a0df6c4](https://github.com/TrogonStack/commanded_eventstore/commit/a0df6c43e353c410b5522dbcb510c73fbe7dee55))
+* **subscriptions:** Stop lock queries from waiting forever on a lock pool that went down ([#25](https://github.com/TrogonStack/commanded_eventstore/issues/25)) ([51b9550](https://github.com/TrogonStack/commanded_eventstore/commit/51b955026fd47a21d53dff9f57c78ae5417d5d13))
+* **subscriptions:** Tell lock owners their lock is gone before the connection finishes closing ([#27](https://github.com/TrogonStack/commanded_eventstore/issues/27)) ([1f9d1f8](https://github.com/TrogonStack/commanded_eventstore/commit/1f9d1f8c291bbcca4a8171f362f7c1344753f0b0))
+
+
+### Miscellaneous
+
+* **test:** Stop timing bound tests failing under load ([#33](https://github.com/TrogonStack/commanded_eventstore/issues/33)) ([d1ca6d1](https://github.com/TrogonStack/commanded_eventstore/commit/d1ca6d1dc6c0af100e11e8053d78d9b87c959953))
+
 ## [1.4.9](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.8...v1.4.9) (2026-09-24)
 
 
