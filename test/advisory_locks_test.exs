@@ -750,9 +750,69 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
-  defp hold_only_connection do
-    conn = lock_pool_pid()
+  describe "release a lock while the lock connection cannot answer" do
+    @tag capture_log: true
+    test "should retry the unlock until the lock is released", %{conn: conn, schema: schema} do
+      alias EventStore.Storage.Session
 
+      locks_name = Module.concat([__MODULE__, ReleaseWithoutSession, AdvisoryLocks])
+      conn_name = Module.concat([locks_name, Postgrex])
+      monitor_name = Module.concat([conn_name, MonitoredServer])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      postgrex_config =
+        config
+        |> Config.advisory_locks_postgrex_opts()
+        |> Config.add_connection_listener(locks_name)
+        |> Keyword.put(:name, conn_name)
+        |> Keyword.merge(queue_target: 1, queue_interval: 1)
+
+      start_supervised!(
+        {MonitoredServer,
+         mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
+        id: monitor_name
+      )
+
+      start_supervised!(
+        {AdvisoryLocks,
+         conn: conn_name,
+         monitor: monitor_name,
+         query_timeout: 100,
+         schema: schema,
+         name: locks_name}
+      )
+
+      # The startup replacement of the pre-registration connection settles once a
+      # session answers, so the lock rides a connection that survives.
+      Wait.until(5_000, fn ->
+        assert {:ok, _session} = Session.current(conn_name, timeout: 100)
+      end)
+
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      # The only pooled connection is busy, so the release cannot confirm its
+      # session and parks the unlock instead of completing it.
+      holder = hold_only_connection(conn_name)
+
+      try do
+        :ok = AdvisoryLocks.release(locks_name, lock)
+
+        Wait.until(fn -> refute Enum.empty?(:sys.get_state(locks_name).released) end)
+      after
+        send(holder, :release)
+      end
+
+      Wait.until(5_000, fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+  end
+
+  defp hold_only_connection(conn \\ lock_pool_pid()) do
     reply_to = self()
 
     holder =
