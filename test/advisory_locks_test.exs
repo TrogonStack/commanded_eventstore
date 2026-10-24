@@ -182,6 +182,33 @@ defmodule EventStore.AdvisoryLocksTest do
       end)
     end
 
+    test "should retry verification for an active lock when a reconnect query fails",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      # A reconnect notice makes verification, not the dropped monitor, responsible
+      # for the lock. The verification query cannot answer while the session is in a
+      # failed transaction, so with only an active lock held it must still schedule a
+      # retry rather than leave the owner holding a lock nothing will reconcile.
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+
+      # The session was alive all along, so the retry confirms the lock and keeps it.
+      refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_500
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+    end
+
     test "should send `lock_released` message when the lock connection crashes" do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
