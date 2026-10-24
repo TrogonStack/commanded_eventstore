@@ -124,8 +124,9 @@ defmodule EventStore.AdvisoryLocks do
     {:ok, ref} = MonitoredServer.monitor(monitor)
 
     # A connection made before this server was registered announced itself to
-    # nobody, so it is replaced by one whose notices can be received.
-    :ok = DBConnection.disconnect_all(conn, 0)
+    # nobody, so it is replaced by one whose notices can be received. A pool that
+    # is down has none, so the replacement is skipped instead of crashing startup.
+    replace_unannounced_connection(conn)
 
     {:ok, %State{state | ref: ref}}
   end
@@ -465,5 +466,12 @@ defmodule EventStore.AdvisoryLocks do
     :exit, reason ->
       {:error,
        ConnectionError.exception("advisory lock connection pool exited: " <> inspect(reason))}
+  end
+
+  defp replace_unannounced_connection(conn) do
+    DBConnection.disconnect_all(conn, 0)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 end
