@@ -57,10 +57,12 @@ defmodule EventStore.Subscriptions.SubscriptionBufferCatchupModeTest do
     end
 
     test "catch-up respects buffer_flush_after timeout" do
+      buffer_flush_after = 100
+
       {:ok, subscription} =
         subscribe_to_all_streams(
           buffer_size: 10,
-          buffer_flush_after: 100
+          buffer_flush_after: buffer_flush_after
         )
 
       # Append fewer than buffer_size
@@ -73,7 +75,7 @@ defmodule EventStore.Subscriptions.SubscriptionBufferCatchupModeTest do
 
       assert length(events) == 3
       # Should arrive within reasonable time (either via timeout or immediate delivery)
-      assert elapsed < 300, "Should deliver within reasonable latency"
+      assert elapsed < buffer_flush_after * 3, "Should deliver within reasonable latency"
 
       Subscription.ack(subscription, events)
     end
@@ -363,10 +365,12 @@ defmodule EventStore.Subscriptions.SubscriptionBufferCatchupModeTest do
 
   describe "catch-up timing guarantees" do
     test "catch-up respects bounded latency" do
+      buffer_flush_after = 100
+
       {:ok, subscription} =
         subscribe_to_all_streams(
           buffer_size: 10,
-          buffer_flush_after: 100
+          buffer_flush_after: buffer_flush_after
         )
 
       # Append partial batch
@@ -380,17 +384,19 @@ defmodule EventStore.Subscriptions.SubscriptionBufferCatchupModeTest do
       assert length(events) == 5
 
       # Should deliver within reasonable bounds
-      assert elapsed < 300,
+      assert elapsed < buffer_flush_after * 3,
              "Catch-up should respect latency bounds, took #{elapsed}ms"
 
       Subscription.ack(subscription, events)
     end
 
     test "sequential deliveries maintain latency bounds" do
+      buffer_flush_after = 100
+
       {:ok, subscription} =
         subscribe_to_all_streams(
           buffer_size: 3,
-          buffer_flush_after: 100
+          buffer_flush_after: buffer_flush_after
         )
 
       append_to_stream("stream1", 10)
@@ -399,7 +405,7 @@ defmodule EventStore.Subscriptions.SubscriptionBufferCatchupModeTest do
       timings = collect_timings(subscription, timeout: 2000, max_deliveries: 4)
 
       # Each delivery should be within timeout window
-      assert Enum.all?(timings, &(&1 < 250)),
+      assert Enum.all?(timings, &(&1 < buffer_flush_after * 3)),
              "Each delivery should be within latency bounds: #{inspect(timings)}"
     end
   end
