@@ -213,6 +213,15 @@ defmodule EventStore.Config do
     end
   end
 
+  @doc """
+  Tell the advisory locks process as soon as its connection starts closing.
+
+  The listener is wrapped in a `{name, node}` tuple, so a notice sent before the
+  name is registered is dropped instead of crashing the connection.
+  """
+  def add_session_listener(opts, name) when is_atom(name),
+    do: Keyword.put(opts, :session_listener, {name, node()})
+
   # Get the optional session mode pool to be used for persistent Postgres
   # connections (advisory locks and notifications). Uses the default Postgres
   # configuration if not specified.

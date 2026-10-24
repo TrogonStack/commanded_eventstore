@@ -155,7 +155,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
       shutdown_database_connection()
 
-      assert_receive({AdvisoryLocks, :lock_released, ^ref, :shutdown})
+      assert_receive({AdvisoryLocks, :lock_released, ^ref, :session_ended})
     end
 
     test "should release the lock when the owner terminates", context do
@@ -345,7 +345,7 @@ defmodule EventStore.AdvisoryLocksTest do
 
       shutdown_database_connection()
 
-      assert_receive({AdvisoryLocks, :lock_released, ^lock, :shutdown})
+      assert_receive({AdvisoryLocks, :lock_released, ^lock, _reason})
     end
 
     test "should send `lock_released` message when the lock session ends and the connection reconnects",
@@ -404,6 +404,89 @@ defmodule EventStore.AdvisoryLocksTest do
       send(@locks, {:disconnected, previous_connection})
 
       refute_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+    end
+
+    test "should send `lock_released` message when the database stops answering new connections",
+         %{conn: conn, schema: schema} do
+      name = :proxied_lock_store
+      locks = Module.concat([name, AdvisoryLocks])
+      lock_pool = Module.concat([locks, Postgrex])
+
+      config = Config.parsed(TestEventStore, :eventstore)
+
+      proxy =
+        start_supervised!(
+          {EventStore.TcpProxy,
+           {Keyword.fetch!(config, :hostname), Keyword.get(config, :port, 5432)}}
+        )
+
+      start_supervised!(
+        {TestEventStore,
+         name: name,
+         schema: schema,
+         session_mode_pool: [
+           port: EventStore.TcpProxy.port(proxy),
+           timeout: 60_000,
+           idle_interval: 100
+         ]}
+      )
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        %Postgrex.Result{rows: [[backend_pid]]} =
+          Postgrex.query!(lock_pool, "SELECT pg_backend_pid()", [])
+
+        :ok = EventStore.TcpProxy.blackhole(proxy)
+
+        %Postgrex.Result{rows: [[true]]} =
+          Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+        Wait.until(fn ->
+          assert %Postgrex.Result{rows: [[0]]} =
+                   Postgrex.query!(
+                     conn,
+                     "SELECT count(*)::int FROM pg_stat_activity WHERE pid = $1",
+                     [backend_pid]
+                   )
+        end)
+
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_000
+      after
+        stop_supervised!(EventStore.TcpProxy)
+      end
+    end
+
+    test "should keep a lock acquired while the lost connection is still closing and unlock it when its owner exits",
+         %{conn: conn, schema: schema} do
+      lock_connection = lock_connection_pid()
+
+      send(@locks, {AdvisoryLocks, :session_lost, lock_connection})
+
+      owner = start_lock_owner(1)
+
+      assert_receive {:owner_acquired, ^owner, {:ok, lock}}, 1_000
+
+      send(@locks, {:disconnected, lock_connection})
+
+      # The lock server has handled the notice once it answers, and the owner forwards
+      # its messages in order, so the probe arrives after any notification the notice sent.
+      :sys.get_state(@locks)
+      send(owner, :probe)
+      assert_receive {:owner_notified, ^owner, :probe}, 1_000
+
+      refute_received {:owner_notified, ^owner, {AdvisoryLocks, :lock_released, ^lock, _reason}}
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      Process.exit(owner, :kill)
+
+      Wait.until(fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
     end
 
     test "should unlock a lock reported lost while its session is still alive",
@@ -809,6 +892,25 @@ defmodule EventStore.AdvisoryLocksTest do
       Wait.until(5_000, fn ->
         assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
       end)
+    end
+  end
+
+  defp start_lock_owner(key) do
+    test_process = self()
+
+    spawn(fn ->
+      send(test_process, {:owner_acquired, self(), AdvisoryLocks.try_advisory_lock(@locks, key)})
+
+      forward_to_test_process(test_process)
+    end)
+  end
+
+  defp forward_to_test_process(test_process) do
+    receive do
+      message ->
+        send(test_process, {:owner_notified, self(), message})
+
+        forward_to_test_process(test_process)
     end
   end
 
