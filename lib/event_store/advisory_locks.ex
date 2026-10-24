@@ -7,11 +7,24 @@ defmodule EventStore.AdvisoryLocks do
 
   use GenServer
 
+  require Logger
+
   alias EventStore.MonitoredServer
+
+  @verify_retry 1_000
 
   defmodule State do
     @moduledoc false
-    defstruct [:conn, :query_timeout, :ref, :schema, locks: %{}]
+    defstruct [
+      :conn,
+      :connection,
+      :query_timeout,
+      :ref,
+      :schema,
+      :verify_timer,
+      locks: %{},
+      released: []
+    ]
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
@@ -25,22 +38,47 @@ defmodule EventStore.AdvisoryLocks do
   defmodule Lock do
     @moduledoc false
 
+    alias EventStore.Storage.Session
+
     @type t :: %Lock{
             key: non_neg_integer(),
             owner: pid(),
-            ref: reference()
+            ref: reference(),
+            session: Session.t()
           }
-    defstruct [:key, :owner, :ref]
+    defstruct [:key, :owner, :ref, :session]
 
-    def new(key, owner) do
-      %Lock{key: key, owner: owner, ref: make_ref()}
+    def new(key, owner, %Session{} = session) do
+      %Lock{key: key, owner: owner, ref: make_ref(), session: session}
     end
 
     def ref(%Lock{ref: ref}), do: ref
+
+    def held_by?(%Lock{session: session}, %Session{} = current), do: session == current
   end
 
-  alias EventStore.AdvisoryLocks.{Lock, State}
+  defmodule Connection do
+    @moduledoc false
+
+    @type t :: %Connection{pid: pid(), monitor_ref: reference()}
+    defstruct [:pid, :monitor_ref]
+
+    def monitor(pid), do: %Connection{pid: pid, monitor_ref: Process.monitor(pid)}
+
+    def demonitor(nil), do: :ok
+
+    def demonitor(%Connection{monitor_ref: monitor_ref}),
+      do: Process.demonitor(monitor_ref, [:flush])
+
+    # Without a known connection any notice may be about the one holding the locks.
+    def current?(nil, _pid), do: true
+    def current?(%Connection{pid: pid}, pid), do: true
+    def current?(%Connection{}, _pid), do: false
+  end
+
+  alias EventStore.AdvisoryLocks.{Connection, Lock, State}
   alias EventStore.Storage
+  alias EventStore.Storage.Session
 
   def start_link(opts) do
     {start_opts, advisory_locks_opts} =
@@ -57,6 +95,10 @@ defmodule EventStore.AdvisoryLocks do
     %State{conn: conn} = state
 
     {:ok, ref} = MonitoredServer.monitor(conn)
+
+    # A connection made before this server was registered announced itself to
+    # nobody, so it is replaced by one whose notices can be received.
+    :ok = DBConnection.disconnect_all(conn, 0)
 
     {:ok, %State{state | ref: ref}}
   end
@@ -101,9 +143,12 @@ defmodule EventStore.AdvisoryLocks do
   defp try_acquire_exclusive_lock(key, owner, timeout, %State{} = state) do
     %State{conn: conn, schema: schema} = state
 
-    with :ok <-
-           Storage.Lock.try_acquire_exclusive_lock(conn, key, schema: schema, timeout: timeout) do
-      {:ok, Lock.new(key, owner)}
+    with {:ok, %Session{} = session} <-
+           Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
+             schema: schema,
+             timeout: timeout
+           ) do
+      {:ok, Lock.new(key, owner, session)}
     end
   end
 
@@ -121,8 +166,33 @@ defmodule EventStore.AdvisoryLocks do
 
     notify_lost_locks(locks, reason)
 
-    {:noreply, %State{state | locks: %{}}}
+    {:noreply, %State{state | connection: nil, locks: %{}, released: [], verify_timer: nil}}
   end
+
+  # A session that could not be verified never reported a disconnect, so the
+  # pending unlocks are reconciled again once it can answer.
+  def handle_info(:verify_sessions, %State{} = state),
+    do: {:noreply, verify_sessions(%State{state | verify_timer: nil})}
+
+  # The connection pool outlives its connections, so a reconnect replaces the
+  # session that held the locks without the pool going down.
+  def handle_info({:connected, conn_pid}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, connected(conn_pid, state)}
+
+  def handle_info({:connected, conn_pid, _tag}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, connected(conn_pid, state)}
+
+  def handle_info({:disconnected, conn_pid}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, disconnected(conn_pid, :session_ended, state)}
+
+  def handle_info({:disconnected, conn_pid, _tag}, %State{} = state) when is_pid(conn_pid),
+    do: {:noreply, disconnected(conn_pid, :session_ended, state)}
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, conn_pid, reason},
+        %State{connection: %Connection{monitor_ref: monitor_ref}} = state
+      ),
+      do: {:noreply, disconnected(conn_pid, reason, state)}
 
   # Release lock when the lock owner process terminates.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %State{} = state) do
@@ -150,9 +220,79 @@ defmodule EventStore.AdvisoryLocks do
     {:stop, reason, state}
   end
 
+  defp connected(conn_pid, %State{connection: connection} = state) do
+    Connection.demonitor(connection)
+
+    verify_sessions(%State{state | connection: Connection.monitor(conn_pid)})
+  end
+
+  # A lock taken through the next connection can be recorded before this notice
+  # is handled, so it is released here too and only unlocked once verified.
+  defp disconnected(conn_pid, reason, %State{connection: connection} = state) do
+    if Connection.current?(connection, conn_pid) do
+      %State{locks: locks, released: released} = state
+
+      Connection.demonitor(connection)
+
+      notify_lost_locks(locks, reason)
+
+      %State{state | connection: nil, locks: %{}, released: Map.values(locks) ++ released}
+    else
+      state
+    end
+  end
+
+  defp verify_sessions(%State{locks: locks, released: []} = state) when map_size(locks) == 0,
+    do: state
+
+  defp verify_sessions(%State{} = state) do
+    %State{conn: conn, locks: locks, query_timeout: query_timeout, released: released} = state
+
+    case Session.current(conn, timeout: query_timeout) do
+      {:ok, %Session{} = session} ->
+        {held, lost} = Map.split_with(locks, fn {_ref, lock} -> Lock.held_by?(lock, session) end)
+
+        notify_lost_locks(lost, :session_ended)
+
+        # A lock whose session has ended died with it, but one still held by this
+        # session is only cleared once its unlock is acknowledged.
+        pending =
+          for %Lock{key: key} = lock <- released,
+              Lock.held_by?(lock, session),
+              release_lock(key, state) != :ok,
+              do: lock
+
+        # A live session confirms the locks still held, so polling stops once
+        # the pending unlocks are drained.
+        maybe_schedule_verify_retry(%State{state | locks: held, released: pending})
+
+      # A failed query does not prove the session ended, so verification is
+      # retried until a live session can confirm the locks and release them.
+      {:error, _error} ->
+        schedule_verify_retry(state)
+    end
+  end
+
+  defp maybe_schedule_verify_retry(%State{released: []} = state), do: state
+  defp maybe_schedule_verify_retry(%State{} = state), do: schedule_verify_retry(state)
+
+  defp schedule_verify_retry(%State{verify_timer: ref} = state) when is_reference(ref), do: state
+
+  defp schedule_verify_retry(%State{} = state),
+    do: %State{state | verify_timer: Process.send_after(self(), :verify_sessions, @verify_retry)}
+
+  defp notify_lost_locks(locks, _reason) when map_size(locks) == 0, do: :ok
+
   defp notify_lost_locks(locks, reason) do
-    for {_ref, %Lock{} = lock} <- locks do
+    Logger.warning(
+      "Lost #{map_size(locks)} advisory lock(s) held by this event store due to: " <>
+        inspect(reason)
+    )
+
+    for {owner_ref, %Lock{} = lock} <- locks do
       %Lock{owner: owner, ref: ref} = lock
+
+      Process.demonitor(owner_ref, [:flush])
 
       :ok = Process.send(owner, {__MODULE__, :lock_released, ref, reason}, [])
     end

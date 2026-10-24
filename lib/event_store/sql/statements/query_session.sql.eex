@@ -1,0 +1,4 @@
+SELECT pg_backend_pid(), COALESCE(
+  NULLIF(current_setting('eventstore.session_id', true), ''),
+  set_config('eventstore.session_id', md5(random()::text || clock_timestamp()::text), false)
+);

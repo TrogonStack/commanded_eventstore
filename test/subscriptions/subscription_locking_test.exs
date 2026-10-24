@@ -5,6 +5,7 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   alias EventStore.Subscriptions.Subscription
 
   @conn TestEventStore.Postgrex
+  @advisory_locks_conn TestEventStore.EventStore.AdvisoryLocks.Postgrex
 
   setup do
     subscription_name = UUID.uuid4()
@@ -105,6 +106,26 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     end
   end
 
+  describe "subscription lock session ended" do
+    setup [:create_subscription]
+
+    test "should resend in-flight events after the lock connection reconnects", %{
+      conn: conn,
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+
+      :ok = terminate_lock_session(conn)
+
+      assert_receive_events([1, 2, 3], 5_000)
+    end
+  end
+
   describe "duplicate subscriptions" do
     setup [:lock_subscription, :create_subscription]
 
@@ -185,6 +206,16 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     [subscription: subscription]
   end
 
+  defp terminate_lock_session(conn) do
+    %Postgrex.Result{rows: [[backend_pid]]} =
+      Postgrex.query!(@advisory_locks_conn, "SELECT pg_backend_pid()", [])
+
+    %Postgrex.Result{rows: [[true]]} =
+      Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+    :ok
+  end
+
   defp reconnect(subscription) do
     Process.send(subscription, :subscribe_to_stream, [])
   end
@@ -208,8 +239,8 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     stream_uuid
   end
 
-  defp assert_receive_events(expected_event_numbers) do
-    assert_receive {:events, received_events}
+  defp assert_receive_events(expected_event_numbers, timeout \\ 2_000) do
+    assert_receive {:events, received_events}, timeout
     assert pluck(received_events, :event_number) == expected_event_numbers
   end
 

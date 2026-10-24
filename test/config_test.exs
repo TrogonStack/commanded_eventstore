@@ -224,6 +224,27 @@ defmodule EventStore.ConfigTest do
     end
   end
 
+  describe "add connection listener" do
+    test "adds the listener as a `{name, node}` tuple" do
+      opts = Config.add_connection_listener([], :listener)
+
+      assert opts[:connection_listeners] == [{:listener, node()}]
+    end
+
+    test "keeps configured listeners" do
+      opts = Config.add_connection_listener([connection_listeners: [:configured]], :listener)
+
+      assert opts[:connection_listeners] == [{:listener, node()}, :configured]
+    end
+
+    test "keeps the tag of configured tagged listeners" do
+      opts =
+        Config.add_connection_listener([connection_listeners: {[:configured], :tag}], :listener)
+
+      assert opts[:connection_listeners] == {[{:listener, node()}, :configured], :tag}
+    end
+  end
+
   test "parse url with query parameters" do
     config = [
       url: "postgres://username:password@localhost/database?ssl=true&pool_size=5&timeout=120000"

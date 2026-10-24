@@ -196,6 +196,23 @@ defmodule EventStore.Config do
     |> Keyword.put(:pool_size, 1)
   end
 
+  @doc """
+  Add a connection listener while keeping any listeners already configured.
+
+  A listener given as a registered name is wrapped in a `{name, node}` tuple, so
+  notifications sent before the name is registered are dropped instead of
+  crashing the connection.
+  """
+  def add_connection_listener(opts, name) when is_atom(name) do
+    listener = {name, node()}
+
+    case Keyword.get(opts, :connection_listeners) do
+      nil -> Keyword.put(opts, :connection_listeners, [listener])
+      {listeners, tag} -> Keyword.put(opts, :connection_listeners, {[listener | listeners], tag})
+      listeners -> Keyword.put(opts, :connection_listeners, [listener | listeners])
+    end
+  end
+
   # Get the optional session mode pool to be used for persistent Postgres
   # connections (advisory locks and notifications). Uses the default Postgres
   # configuration if not specified.

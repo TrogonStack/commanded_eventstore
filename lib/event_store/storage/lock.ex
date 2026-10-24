@@ -2,6 +2,7 @@ defmodule EventStore.Storage.Lock do
   @moduledoc false
 
   alias EventStore.Sql.Statements
+  alias EventStore.Storage.Session
 
   @doc """
   Use two 32-bit key values for advisory locks where the first key acts as the
@@ -24,6 +25,27 @@ defmodule EventStore.Storage.Lock do
       {:ok, %Postgrex.Result{rows: [[true]]}} -> :ok
       {:ok, %Postgrex.Result{rows: [[false]]}} -> {:error, :lock_already_taken}
       {:error, _error} = reply -> reply
+    end
+  end
+
+  @doc """
+  Like `try_acquire_exclusive_lock/3`, but also returns the session holding the
+  lock, which releases it when it ends.
+  """
+  def try_acquire_exclusive_session_lock(conn, key, opts) do
+    {schema, opts} = Keyword.pop(opts, :schema)
+
+    query = Statements.try_advisory_session_lock(schema)
+
+    case Postgrex.query(conn, query, [key], opts) do
+      {:ok, %Postgrex.Result{rows: [[true, backend_pid, session_id]]}} ->
+        {:ok, Session.new(backend_pid, session_id)}
+
+      {:ok, %Postgrex.Result{rows: [[false, _backend_pid, _session_id]]}} ->
+        {:error, :lock_already_taken}
+
+      {:error, _error} = reply ->
+        reply
     end
   end
 
