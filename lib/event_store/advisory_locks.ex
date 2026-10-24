@@ -262,16 +262,20 @@ defmodule EventStore.AdvisoryLocks do
               release_lock(key, state) != :ok,
               do: lock
 
-        schedule_verify_retry(%State{state | locks: held, released: pending})
+        # A live session confirms the locks still held, so polling stops once
+        # the pending unlocks are drained.
+        maybe_schedule_verify_retry(%State{state | locks: held, released: pending})
 
-      # A failed query does not prove the session ended, so the pending unlocks
-      # are retried until a live session can confirm and release them.
+      # A failed query does not prove the session ended, so verification is
+      # retried until a live session can confirm the locks and release them.
       {:error, _error} ->
         schedule_verify_retry(state)
     end
   end
 
-  defp schedule_verify_retry(%State{released: []} = state), do: state
+  defp maybe_schedule_verify_retry(%State{released: []} = state), do: state
+  defp maybe_schedule_verify_retry(%State{} = state), do: schedule_verify_retry(state)
+
   defp schedule_verify_retry(%State{verify_timer: ref} = state) when is_reference(ref), do: state
 
   defp schedule_verify_retry(%State{} = state),
