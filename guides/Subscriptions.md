@@ -425,14 +425,14 @@ Consider a scenario with different traffic patterns per partition:
 #### The Flow
 
 1. **Events arrive** across multiple partitions:
-   ```
+   ```text
    Stream-A: Event #100, #101, #104
    Stream-B: Event #102
    Stream-C: Event #103
    ```
 
 2. **Per-partition timers** control when events are sent to subscribers:
-   ```
+   ```text
    T=0s:  All events buffered
    T=5s:  Stream-B timer fires → Event #102 sent to subscriber
    T=5.1s: Stream-A timer fires → Events #100, #101, #104 sent
@@ -453,7 +453,7 @@ Consider a scenario with different traffic patterns per partition:
    ```
 
 4. **Checkpoint advances** in global event order:
-   ```
+   ```text
    After ACK 102: Checkpoint cannot advance (event 100 not ACK'd yet)
    After ACK 104: Checkpoint advances to 102 (100, 101, 102 all ACK'd)
    After ACK 103: Checkpoint advances to 104 (all events ACK'd)
