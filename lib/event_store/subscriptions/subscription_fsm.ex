@@ -185,10 +185,10 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     defevent notify_events(events), data: %SubscriptionState{} = data do
       case validate_event_continuity(data, events) do
         :past ->
-          next_state(:max_capacity, data)
+          next_state(:max_capacity, track_last_received(data, events))
 
         :future ->
-          next_state(:request_catch_up, data)
+          next_state(:request_catch_up, track_last_received(data, events))
 
         :expected ->
           data = enqueue_events(data, events)
