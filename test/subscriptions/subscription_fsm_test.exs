@@ -1,7 +1,8 @@
 defmodule EventStore.Subscriptions.SubscriptionFsmTest do
   use EventStore.StorageCase
 
-  alias EventStore.{Storage, UUID}
+  alias EventStore.{EventFactory, Storage, UUID}
+  alias EventStore.Storage.Lock
   alias EventStore.Subscriptions.{SubscriptionFsm, SubscriptionState}
 
   # The states that own a stored position, and those that do not.
@@ -17,10 +18,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         schema: context.schema
       )
 
+    fencing_token = claim_token(context, subscription_id)
+
+    on_exit(fn -> :ok = Lock.unlock(context.conn, subscription_id, schema: context.schema) end)
+
     [
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
-      subscription_id: subscription_id
+      subscription_id: subscription_id,
+      fencing_token: fencing_token
     ]
   end
 
@@ -153,6 +159,31 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
                SubscriptionFsm.checkpoint(fsm)
 
       assert_received {:checkpoint_failed, :subscription_not_found}
+    end
+
+    test "tells the subscription it is fenced when the probe that classifies the rejection fails",
+         context do
+      %{conn: conn, schema: schema, subscription_id: subscription_id} = context
+
+      probe_conn = start_supervised!({Postgrex, context.postgrex_config}, id: :probe_conn)
+      lock_ref = make_ref()
+
+      fsm = fsm(context, checkpoints_pending: 1, last_ack: 3, conn: probe_conn)
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{fsm.data | lock_ref: lock_ref}}
+
+      {:ok, _result} =
+        Postgrex.query(
+          conn,
+          ~s|UPDATE "#{schema}".subscriptions SET lock_generation = lock_generation + 1 WHERE subscription_id = $1|,
+          [subscription_id]
+        )
+
+      drop_privileges_after_update(context)
+
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
+               SubscriptionFsm.checkpoint(fsm)
+
+      assert_received {:fenced, ^lock_ref}
     end
 
     test "does not write the position onto a subscription that reused the name", context do
@@ -305,24 +336,126 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
   end
 
+  describe "subscribe/1 after another owner advanced the stored position" do
+    test "catches up to the stored position and subscribes instead of spinning on empty reads",
+         context do
+      reclaim_after_other_owner_acked(context, appended: 15, stored: 15)
+
+      fsm = fsm(context, state: :disconnected, last_received: 10, last_sent: 5, last_ack: 5)
+
+      assert %SubscriptionFsm{state: :request_catch_up, data: data} =
+               SubscriptionFsm.subscribe(fsm)
+
+      assert data.last_ack == 15
+      assert data.last_sent == 15
+
+      assert %SubscriptionFsm{state: :subscribed, data: data} =
+               SubscriptionFsm.catch_up(%SubscriptionFsm{state: :request_catch_up, data: data})
+
+      assert data.last_received == 15
+    end
+
+    test "does not move last_received backwards when events past the stored position were seen",
+         context do
+      reclaim_after_other_owner_acked(context, appended: 20, stored: 15)
+
+      fsm = fsm(context, state: :disconnected, last_received: 20, last_sent: 5, last_ack: 5)
+
+      assert %SubscriptionFsm{state: :request_catch_up, data: data} =
+               SubscriptionFsm.subscribe(fsm)
+
+      assert data.last_received == 20
+
+      assert %SubscriptionFsm{state: :catching_up, data: data} =
+               SubscriptionFsm.catch_up(%SubscriptionFsm{state: :request_catch_up, data: data})
+
+      assert data.queue_size == 5
+      assert data.last_received == 20
+    end
+  end
+
+  defp reclaim_after_other_owner_acked(context, appended: appended, stored: stored) do
+    %{conn: conn, schema: schema, subscription_id: subscription_id} = context
+
+    :ok =
+      TestEventStore.append_to_stream(
+        context.stream_uuid,
+        0,
+        EventFactory.create_events(appended)
+      )
+
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        ~s|UPDATE "#{schema}".subscriptions SET last_seen = $2 WHERE subscription_id = $1|,
+        [subscription_id, stored]
+      )
+
+    :ok = Lock.unlock(conn, subscription_id, schema: schema)
+  end
+
+  defp claim_token(%{conn: conn, schema: schema}, subscription_id) do
+    {:ok, %Lock.Lease{token: token}} =
+      Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+
+    token
+  end
+
   defp fsm(context, overrides \\ []) do
     %{conn: conn, schema: schema} = context
     %{stream_uuid: stream_uuid, subscription_name: subscription_name} = context
     %{subscription_id: subscription_id} = context
 
     data = %SubscriptionState{
-      conn: conn,
+      conn: Keyword.get(overrides, :conn, conn),
       schema: Keyword.get(overrides, :schema, schema),
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
       subscription_id: subscription_id,
+      fencing_token: context.fencing_token,
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
       query_timeout: 15_000,
+      event_store: TestEventStore,
+      serializer: context.serializer,
+      correlation_id_type: context.correlation_id_type,
+      causation_id_type: context.causation_id_type,
+      max_size: 1_000,
+      last_received: Keyword.get(overrides, :last_received, 0),
+      last_sent: Keyword.get(overrides, :last_sent, 0),
       transient: Keyword.get(overrides, :transient, false)
     }
 
     %SubscriptionFsm{state: Keyword.get(overrides, :state, :subscribed), data: data}
+  end
+
+  defp drop_privileges_after_update(%{conn: conn, schema: schema}) do
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        """
+        CREATE FUNCTION fsm_test_drop_privileges() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM set_config('role', 'pg_monitor', false); RETURN NULL; END $$
+        """,
+        []
+      )
+
+    {:ok, _result} =
+      Postgrex.query(
+        conn,
+        ~s|CREATE TRIGGER fsm_test_drop_privileges AFTER UPDATE ON "#{schema}".subscriptions FOR EACH STATEMENT EXECUTE FUNCTION fsm_test_drop_privileges()|,
+        []
+      )
+
+    on_exit(fn ->
+      Postgrex.query!(
+        conn,
+        ~s|DROP TRIGGER fsm_test_drop_privileges ON "#{schema}".subscriptions|,
+        []
+      )
+
+      Postgrex.query!(conn, "DROP FUNCTION fsm_test_drop_privileges()", [])
+    end)
   end
 
   defp reset_position(context) do

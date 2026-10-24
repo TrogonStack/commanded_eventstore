@@ -18,6 +18,7 @@ defmodule EventStore.AdvisoryLocks do
     defstruct [
       :conn,
       :connection,
+      :monitor,
       :query_timeout,
       :ref,
       :schema,
@@ -28,33 +29,58 @@ defmodule EventStore.AdvisoryLocks do
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
+      monitor = Keyword.fetch!(opts, :monitor)
       query_timeout = Keyword.fetch!(opts, :query_timeout)
       schema = Keyword.fetch!(opts, :schema)
 
-      %State{conn: conn, query_timeout: query_timeout, schema: schema}
+      %State{conn: conn, monitor: monitor, query_timeout: query_timeout, schema: schema}
     end
   end
 
   defmodule Lock do
     @moduledoc false
 
+    alias EventStore.Storage.Lock.Lease, as: StorageLease
     alias EventStore.Storage.Session
 
     @type t :: %Lock{
             key: non_neg_integer(),
             owner: pid(),
             ref: reference(),
-            session: Session.t()
+            session: Session.t(),
+            lease: StorageLease.t() | nil
           }
-    defstruct [:key, :owner, :ref, :session]
+    defstruct [:key, :owner, :ref, :session, :lease]
 
-    def new(key, owner, %Session{} = session) do
-      %Lock{key: key, owner: owner, ref: make_ref(), session: session}
+    def new(key, owner, %Session{} = session, lease \\ nil) do
+      %Lock{key: key, owner: owner, ref: make_ref(), session: session, lease: lease}
     end
 
     def ref(%Lock{ref: ref}), do: ref
 
     def held_by?(%Lock{session: session}, %Session{} = current), do: session == current
+  end
+
+  defmodule Lease do
+    @moduledoc false
+
+    alias EventStore.Storage.Lock.Lease, as: StorageLease
+    alias EventStore.Storage.Session
+    alias EventStore.Subscriptions.FencingToken
+
+    @type t :: %Lease{
+            ref: reference(),
+            token: FencingToken.t(),
+            last_seen: non_neg_integer() | nil,
+            session: Session.t()
+          }
+    defstruct [:ref, :token, :last_seen, :session]
+
+    def new(ref, %StorageLease{} = lease) do
+      %StorageLease{token: token, last_seen: last_seen, session: session} = lease
+
+      %Lease{ref: ref, token: token, last_seen: last_seen, session: session}
+    end
   end
 
   defmodule Connection do
@@ -76,7 +102,8 @@ defmodule EventStore.AdvisoryLocks do
     def current?(%Connection{}, _pid), do: false
   end
 
-  alias EventStore.AdvisoryLocks.{Connection, Lock, State}
+  alias DBConnection.ConnectionError
+  alias EventStore.AdvisoryLocks.{Connection, Lease, Lock, State}
   alias EventStore.Storage
   alias EventStore.Storage.Session
 
@@ -92,13 +119,14 @@ defmodule EventStore.AdvisoryLocks do
   def init(%State{} = state) do
     Process.flag(:trap_exit, true)
 
-    %State{conn: conn} = state
+    %State{conn: conn, monitor: monitor} = state
 
-    {:ok, ref} = MonitoredServer.monitor(conn)
+    {:ok, ref} = MonitoredServer.monitor(monitor)
 
     # A connection made before this server was registered announced itself to
-    # nobody, so it is replaced by one whose notices can be received.
-    :ok = DBConnection.disconnect_all(conn, 0)
+    # nobody, so it is replaced by one whose notices can be received. A pool that
+    # is down has none, so the replacement is skipped instead of crashing startup.
+    replace_unannounced_connection(conn)
 
     {:ok, %State{state | ref: ref}}
   end
@@ -126,28 +154,138 @@ defmodule EventStore.AdvisoryLocks do
           {:ok, reference()} | {:error, :lock_already_taken} | {:error, term}
   def try_advisory_lock(server, key, timeout \\ 5_000) when is_integer(key) do
     GenServer.call(server, {:try_advisory_lock, key, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
   end
 
-  def handle_call({:try_advisory_lock, key, owner, timeout}, _from, %State{} = state) do
-    case try_acquire_exclusive_lock(key, owner, timeout, state) do
-      {:ok, %Lock{} = lock} ->
+  @doc """
+  Attempt to obtain the advisory lock of a subscription, recording the new lock
+  owner on the subscription row.
+
+  Returns `{:ok, lease}` when the lock is acquired, `{:error, :lock_already_taken}`
+  if it cannot be acquired immediately, or `{:error, :subscription_not_found}`
+  when the subscription no longer exists. The lock is released and lost the same
+  way as the one returned by `try_advisory_lock/3`, identified by `lease.ref`.
+  """
+  @spec try_subscription_lock(server :: GenServer.server(), pos_integer(), timeout()) ::
+          {:ok, Lease.t()}
+          | {:error, :lock_already_taken}
+          | {:error, :subscription_not_found}
+          | {:error, term}
+  def try_subscription_lock(server, subscription_id, timeout \\ 5_000)
+      when is_integer(subscription_id) do
+    GenServer.call(server, {:try_subscription_lock, subscription_id, self(), timeout}, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+  end
+
+  @doc """
+  Release a lock acquired by `try_advisory_lock/3` or `try_subscription_lock/3`
+  before its owner terminates.
+
+  The owner is not sent a `lock_released` message. Releasing a reference that is
+  no longer held succeeds.
+
+  Returns as soon as the request is queued so a caller is never held up by a
+  lock connection that has stopped answering.
+  """
+  @spec release(server :: GenServer.server(), reference()) :: :ok
+  def release(server, ref) when is_reference(ref) do
+    GenServer.cast(server, {:release, ref})
+  end
+
+  def handle_cast({:release, ref}, %State{} = state) do
+    %State{locks: locks} = state
+
+    state =
+      case Enum.find(locks, fn {_owner_ref, lock} -> Lock.ref(lock) == ref end) do
+        nil ->
+          state
+
+        {owner_ref, %Lock{} = lock} ->
+          Process.demonitor(owner_ref, [:flush])
+
+          release_held_lock(lock, %State{state | locks: Map.delete(locks, owner_ref)})
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_call(
+        {:try_subscription_lock, subscription_id, owner, timeout},
+        _from,
+        %State{} = state
+      ) do
+    case {held_lock(state, subscription_id, owner),
+          claim_subscription_lock(subscription_id, timeout, state)} do
+      {nil, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
+        lock = Lock.new(subscription_id, owner, session, lease)
         state = monitor_acquired_lock(lock, state)
 
-        {:reply, {:ok, Lock.ref(lock)}, state}
+        {:reply, {:ok, Lease.new(Lock.ref(lock), lease)}, state}
 
-      reply ->
+      {{owner_ref, %Lock{} = held}, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
+        %Lock{key: key, ref: ref} = held
+        %State{locks: locks} = state
+
+        if Lock.held_by?(held, session), do: release_lock(key, state)
+
+        lock = %Lock{held | session: session, lease: lease}
+
+        {:reply, {:ok, Lease.new(ref, lease)},
+         %State{state | locks: Map.put(locks, owner_ref, lock)}}
+
+      {_held, reply} ->
         {:reply, reply, state}
     end
   end
 
+  def handle_call({:try_advisory_lock, key, owner, timeout}, _from, %State{} = state) do
+    case held_lock(state, key, owner) do
+      {_owner_ref, %Lock{} = lock} ->
+        {:reply, {:ok, Lock.ref(lock)}, state}
+
+      nil ->
+        case try_acquire_exclusive_lock(key, owner, timeout, state) do
+          {:ok, %Lock{} = lock} ->
+            state = monitor_acquired_lock(lock, state)
+
+            {:reply, {:ok, Lock.ref(lock)}, state}
+
+          reply ->
+            {:reply, reply, state}
+        end
+    end
+  end
+
+  defp claim_subscription_lock(subscription_id, timeout, %State{} = state) do
+    %State{schema: schema} = state
+
+    query(state, fn conn ->
+      Storage.Lock.claim_subscription_lock(conn, subscription_id,
+        schema: schema,
+        timeout: timeout
+      )
+    end)
+  end
+
+  defp held_lock(%State{locks: locks}, key, owner) do
+    Enum.find(locks, fn
+      {_owner_ref, %Lock{key: ^key, owner: ^owner}} -> true
+      _other -> false
+    end)
+  end
+
   defp try_acquire_exclusive_lock(key, owner, timeout, %State{} = state) do
-    %State{conn: conn, schema: schema} = state
+    %State{schema: schema} = state
 
     with {:ok, %Session{} = session} <-
-           Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
-             schema: schema,
-             timeout: timeout
-           ) do
+           query(state, fn conn ->
+             Storage.Lock.try_acquire_exclusive_session_lock(conn, key,
+               schema: schema,
+               timeout: timeout
+             )
+           end) do
       {:ok, Lock.new(key, owner, session)}
     end
   end
@@ -246,9 +384,9 @@ defmodule EventStore.AdvisoryLocks do
     do: state
 
   defp verify_sessions(%State{} = state) do
-    %State{conn: conn, locks: locks, query_timeout: query_timeout, released: released} = state
+    %State{locks: locks, query_timeout: query_timeout, released: released} = state
 
-    case Session.current(conn, timeout: query_timeout) do
+    case query(state, &Session.current(&1, timeout: query_timeout)) do
       {:ok, %Session{} = session} ->
         {held, lost} = Map.split_with(locks, fn {_ref, lock} -> Lock.held_by?(lock, session) end)
 
@@ -300,9 +438,30 @@ defmodule EventStore.AdvisoryLocks do
     :ok
   end
 
-  defp release_lock(key, %State{} = state) do
-    %State{conn: conn, query_timeout: query_timeout, schema: schema} = state
+  # An owner holds a key once, so releasing it unlocks that owner's hold and leaves
+  # the holds of every other owner in place.
+  defp release_held_lock(%Lock{} = lock, %State{released: released} = state) do
+    verify_sessions(%State{state | released: [lock | released]})
+  end
 
-    Storage.Lock.unlock(conn, key, schema: schema, timeout: query_timeout)
+  defp release_lock(key, %State{} = state) do
+    %State{query_timeout: query_timeout, schema: schema} = state
+
+    query(state, &Storage.Lock.unlock(&1, key, schema: schema, timeout: query_timeout))
+  end
+
+  defp query(%State{conn: conn}, fun) do
+    fun.(conn)
+  catch
+    :exit, reason ->
+      {:error,
+       ConnectionError.exception("advisory lock connection pool exited: " <> inspect(reason))}
+  end
+
+  defp replace_unannounced_connection(conn) do
+    DBConnection.disconnect_all(conn, 0)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 end

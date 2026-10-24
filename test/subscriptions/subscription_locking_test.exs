@@ -1,10 +1,13 @@
 defmodule EventStore.Subscriptions.SubscriptionLockingTest do
   use EventStore.StorageCase
 
-  alias EventStore.{Config, EventFactory, Storage, UUID}
-  alias EventStore.Subscriptions.Subscription
+  import ExUnit.CaptureLog
+
+  alias EventStore.{Config, EventFactory, Storage, UUID, Wait}
+  alias EventStore.Subscriptions.{FencingToken, Subscription}
 
   @conn TestEventStore.Postgrex
+  @advisory_locks TestEventStore.EventStore.AdvisoryLocks
   @advisory_locks_conn TestEventStore.EventStore.AdvisoryLocks.Postgrex
 
   setup do
@@ -81,7 +84,9 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
       {:ok, %Storage.Subscription{subscription_id: subscription_id}} =
         Storage.Subscription.subscription(@conn, "$all", subscription_name, schema: schema)
 
-      :ok = Storage.Subscription.ack_last_seen_event(@conn, subscription_id, 2, schema: schema)
+      token = FencingToken.new(subscription_id, lock_generation(subscription_id, schema))
+
+      :ok = Storage.Subscription.ack_last_seen_event(@conn, token, 2, schema: schema)
 
       :ok = reconnect(subscription)
 
@@ -163,6 +168,173 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     end
   end
 
+  describe "late lock notice" do
+    setup [:create_subscription]
+
+    test "should keep running when the lock was already released", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      Process.flag(:trap_exit, true)
+      monitor_ref = Process.monitor(subscription)
+
+      lock_ref = lock_ref(subscription)
+
+      :ok = release_lock(subscription, lock_ref)
+      :sys.get_state(subscription)
+
+      :ok = release_lock(subscription, lock_ref)
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      :ok = reconnect(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+
+    test "should ignore a notice for a lock that was replaced by a new one", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      Process.flag(:trap_exit, true)
+      monitor_ref = Process.monitor(subscription)
+
+      old_lock_ref = lock_ref(subscription)
+
+      :ok = release_lock(subscription, old_lock_ref)
+      :ok = reconnect(subscription)
+
+      _new_lock_ref = wait_for_new_lock_ref(subscription, old_lock_ref)
+
+      :ok = release_lock(subscription, old_lock_ref)
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+  end
+
+  describe "late fenced notice" do
+    setup [:create_subscription]
+
+    test "should keep running when the lock was already released", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      monitor_ref = Process.monitor(subscription)
+
+      lock_ref = lock_ref(subscription)
+
+      :ok = disconnect(subscription)
+      :sys.get_state(subscription)
+
+      send(subscription, {:fenced, lock_ref})
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      :ok = reconnect(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+
+    test "should ignore a notice for a lock that was replaced by a new one", %{
+      event_store: event_store,
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      monitor_ref = Process.monitor(subscription)
+
+      old_lock_ref = lock_ref(subscription)
+
+      :ok = disconnect(subscription)
+      :ok = reconnect(subscription)
+
+      new_lock_ref = wait_for_new_lock_ref(subscription, old_lock_ref)
+
+      Wait.until(fn -> assert :subscribed == subscription_state(subscription) end)
+
+      send(subscription, {:fenced, old_lock_ref})
+
+      refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
+      assert Process.alive?(subscription)
+
+      assert :subscribed == subscription_state(subscription)
+      assert new_lock_ref == lock_ref(subscription)
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+    end
+  end
+
+  describe "subscription stopped after another owner took over" do
+    test "should leave the progress of the new owner untouched", %{
+      conn: conn,
+      event_store: event_store,
+      schema: schema,
+      subscription_name: subscription_name
+    } do
+      {:ok, subscription} =
+        event_store.subscribe_to_all_streams(subscription_name, self(),
+          buffer_size: 3,
+          checkpoint_threshold: 100
+        )
+
+      assert_receive {:subscribed, ^subscription}
+
+      append_events_to_stream(event_store, 3)
+
+      assert_receive_events([1, 2, 3])
+
+      Postgrex.query!(
+        conn,
+        "UPDATE \"#{schema}\".subscriptions SET lock_generation = lock_generation + 1, last_seen = 2 WHERE subscription_name = $1",
+        [subscription_name]
+      )
+
+      :ok = Subscription.ack(subscription, 3)
+
+      monitor_ref = Process.monitor(subscription)
+
+      log =
+        capture_log(fn ->
+          assert :ok = GenServer.stop(subscription)
+        end)
+
+      assert_receive {:DOWN, ^monitor_ref, :process, ^subscription, :normal}
+      refute log =~ "terminating"
+
+      assert 2 == last_seen(conn, schema, subscription_name)
+    end
+  end
+
+  defp last_seen(conn, schema, subscription_name) do
+    %Postgrex.Result{rows: [[last_seen]]} =
+      Postgrex.query!(
+        conn,
+        "SELECT last_seen FROM \"#{schema}\".subscriptions WHERE subscription_name = $1",
+        [subscription_name]
+      )
+
+    last_seen
+  end
+
   defp lock_subscription(context) do
     %{config: config, schema: schema} = context
 
@@ -216,12 +388,50 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     :ok
   end
 
+  defp lock_generation(subscription_id, schema) do
+    %Postgrex.Result{rows: [[generation]]} =
+      Postgrex.query!(
+        @conn,
+        "SELECT lock_generation FROM \"#{schema}\".subscriptions WHERE subscription_id = $1",
+        [subscription_id]
+      )
+
+    generation
+  end
+
   defp reconnect(subscription) do
     Process.send(subscription, :subscribe_to_stream, [])
   end
 
   defp disconnect(subscription) do
+    release_lock(subscription, lock_ref(subscription))
+  end
+
+  defp lock_ref(subscription) do
     %Subscription{subscription: %{data: %{lock_ref: lock_ref}}} = :sys.get_state(subscription)
+
+    lock_ref
+  end
+
+  defp subscription_state(subscription) do
+    %Subscription{subscription: %{state: state}} = :sys.get_state(subscription)
+
+    state
+  end
+
+  defp wait_for_new_lock_ref(subscription, old_lock_ref) do
+    Wait.until(2_000, fn ->
+      lock_ref = lock_ref(subscription)
+
+      assert is_reference(lock_ref) and lock_ref != old_lock_ref
+
+      lock_ref
+    end)
+  end
+
+  defp release_lock(subscription, lock_ref) do
+    :ok = EventStore.AdvisoryLocks.release(@advisory_locks, lock_ref)
+    _state = :sys.get_state(@advisory_locks)
 
     Process.send(
       subscription,

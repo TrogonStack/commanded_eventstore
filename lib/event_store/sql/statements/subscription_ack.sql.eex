@@ -1,3 +1,8 @@
-UPDATE "<%= schema %>".subscriptions
-SET last_seen = $2
-WHERE subscription_id = $1;
+WITH progress AS (
+  UPDATE "<%= schema %>".subscriptions
+  SET last_seen = GREATEST(last_seen, $2)
+  WHERE subscription_id = $1 AND lock_generation = $3
+  RETURNING subscription_id
+)
+SELECT EXISTS (SELECT 1 FROM progress) AS acknowledged,
+       EXISTS (SELECT 1 FROM "<%= schema %>".subscriptions WHERE subscription_id = $1) AS present;
