@@ -148,26 +148,45 @@ defmodule EventStore.Storage.Subscription do
         # Naming the subscription by its identifier, rather than by the stream and name a later
         # subscription can reuse, is what keeps this from writing a checkpoint onto whichever row
         # holds that name now.
-        {:ok, %Postgrex.Result{rows: [[true, _present]]}} ->
+        {:ok, %Postgrex.Result{num_rows: 1}} ->
           :ok
 
-        {:ok, %Postgrex.Result{rows: [[false, true]]}} ->
+        {:ok, %Postgrex.Result{num_rows: 0}} ->
+          rejected(conn, subscription_id, schema, opts)
+
+        {:error, error} = reply ->
           Logger.warning(
-            "Failed to ack last seen event for subscription #{subscription_id} because another lock owner has claimed it"
+            "Failed to ack last seen event for subscription #{subscription_id} due to: " <>
+              inspect(error)
           )
 
-          {:error, :fenced}
+          reply
+      end
+    end
 
-        {:ok, %Postgrex.Result{rows: [[false, false]]}} ->
+    # A delete that commits while the update waits on its row is only visible to a statement that
+    # starts after it, so asking within the update would still find the deleted row.
+    defp rejected(conn, subscription_id, schema, opts) do
+      query = Statements.query_subscription_exists(schema)
+
+      case Postgrex.query(conn, query, [subscription_id], opts) do
+        {:ok, %Postgrex.Result{rows: [[false]]}} ->
           Logger.warning(
             "Failed to ack last seen event for subscription #{subscription_id} because it no longer exists"
           )
 
           {:error, :subscription_not_found}
 
+        {:ok, %Postgrex.Result{rows: [[true]]}} ->
+          Logger.warning(
+            "Failed to ack last seen event for subscription #{subscription_id} because another lock owner has claimed it"
+          )
+
+          {:error, :fenced}
+
         {:error, error} = reply ->
           Logger.warning(
-            "Failed to ack last seen event for subscription #{subscription_id} due to: " <>
+            "Failed to ack last seen event for subscription #{subscription_id}, which refused the write, due to: " <>
               inspect(error)
           )
 
