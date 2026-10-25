@@ -1,0 +1,5 @@
+SELECT set_config('lock_timeout', $1::bigint::text, true)
+FROM pg_settings
+WHERE name = 'lock_timeout'
+  AND $1::bigint > 0
+  AND (setting::bigint = 0 OR setting::bigint > $1::bigint);

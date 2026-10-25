@@ -21,6 +21,7 @@ defmodule EventStore.Sql.Statements do
         {:try_advisory_lock, [:schema]},
         {:try_advisory_session_lock, [:schema]},
         {:advisory_unlock, [:schema]},
+        {:bound_lock_wait, []},
         {:claim_subscription_lock, [:schema]},
         {:subscription_ack, [:schema]},
         {:insert_snapshot, [:schema]},
