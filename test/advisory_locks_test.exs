@@ -417,7 +417,7 @@ defmodule EventStore.AdvisoryLocksTest do
       proxy =
         start_supervised!(
           {EventStore.TcpProxy,
-           {Keyword.fetch!(config, :hostname), Keyword.get(config, :port, 5432)}}
+           {Keyword.fetch!(config, :hostname), Keyword.fetch!(config, :port)}}
         )
 
       start_supervised!(

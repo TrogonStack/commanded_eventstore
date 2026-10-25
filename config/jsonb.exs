@@ -13,6 +13,7 @@ default_config = [
   password: "postgres",
   database: "eventstore_jsonb_test",
   hostname: "localhost",
+  port: String.to_integer(System.get_env("PGPORT", "5432")),
   pool_size: 1,
   serializer: EventStore.JsonbSerializer,
   subscription_retry_interval: 1_000,
