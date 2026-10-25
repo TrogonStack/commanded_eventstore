@@ -4,6 +4,7 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
   alias EventStore.Storage
   alias EventStore.Storage.Lock
   alias EventStore.Subscriptions.FencingToken
+  alias EventStore.Wait
 
   @all_stream "$all"
   @subscription_name "test_subscription"
@@ -208,6 +209,52 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     :ok = Storage.ack_last_seen_event(conn, token, 5, schema: schema)
 
     assert {:ok, %Storage.Subscription{last_seen: 10}} = read_subscription(context)
+  end
+
+  test "ack last seen event racing a delete reports the subscription as gone", context do
+    %{conn: conn, schema: schema, postgrex_config: postgrex_config} = context
+
+    {:ok, %Storage.Subscription{subscription_id: subscription_id}} = subscribe_to_stream(context)
+
+    token = claim_token(context, subscription_id)
+
+    deleter = start_supervised!({Postgrex, postgrex_config}, id: :deleter)
+    observer = start_supervised!({Postgrex, postgrex_config}, id: :observer)
+
+    test = self()
+
+    delete =
+      Task.async(fn ->
+        Postgrex.transaction(deleter, fn deleter ->
+          :ok =
+            Storage.delete_subscription(deleter, @all_stream, @subscription_name, schema: schema)
+
+          send(test, :deleted)
+
+          receive do
+            :commit -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :deleted
+
+    ack = Task.async(fn -> Storage.ack_last_seen_event(conn, token, 1, schema: schema) end)
+
+    Wait.until(5_000, fn ->
+      assert %Postgrex.Result{rows: [[1]]} =
+               Postgrex.query!(
+                 observer,
+                 "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                 []
+               )
+    end)
+
+    send(delete.pid, :commit)
+
+    assert {:ok, :ok} = Task.await(delete)
+    assert {:error, :subscription_not_found} = Task.await(ack)
+    assert {:error, :subscription_not_found} = read_subscription(context)
   end
 
   defp read_subscription(context) do

@@ -161,8 +161,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_received {:checkpoint_failed, :subscription_not_found}
     end
 
-    test "tells the subscription it is fenced when the probe that classifies the rejection fails",
-         context do
+    test "does not take a rejection it could not classify for a fence", context do
       %{conn: conn, schema: schema, subscription_id: subscription_id} = context
 
       probe_conn = start_supervised!({Postgrex, context.postgrex_config}, id: :probe_conn)
@@ -180,10 +179,12 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       drop_privileges_after_update(context)
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
-               SubscriptionFsm.checkpoint(fsm)
+      assert %SubscriptionFsm{} = SubscriptionFsm.checkpoint(fsm)
 
-      assert_received {:fenced, ^lock_ref}
+      # Claiming the lock again would recreate a row that a delete removed, so only a probe that
+      # found the row may send the subscription to do that.
+      refute_received {:fenced, ^lock_ref}
+      refute_received {:checkpoint_failed, _reason}
     end
 
     test "does not write the position onto a subscription that reused the name", context do
