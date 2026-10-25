@@ -67,6 +67,88 @@ defmodule EventStore.MigrateEventStoreTest do
     end
   end
 
+  describe "migrate an event store in its own schema" do
+    test "should leave other event stores in the same database untouched", %{config: config} do
+      restore_pre_migration_event_store(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(conn, ~s(ALTER SCHEMA public RENAME TO "example"), [])
+        Postgrex.query!(conn, "CREATE SCHEMA public", [])
+
+        EventStore.Storage.Initializer.run!(conn, config)
+      end)
+
+      public_history = migration_history(config, "public")
+
+      migrate_eventstore(Keyword.put(config, :schema, "example"), quiet: true, is_mix: false)
+
+      assert has_lock_generation?(config, "example")
+      assert "1.5.0" == latest_version(config, "example")
+      assert public_history == migration_history(config, "public")
+    end
+  end
+
+  defp has_lock_generation?(config, schema) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: [[exists]]} =
+        Postgrex.query!(
+          conn,
+          """
+          SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = $1
+            AND table_name = 'subscriptions'
+            AND column_name = 'lock_generation'
+          )
+          """,
+          [schema]
+        )
+
+      exists
+    end)
+  end
+
+  defp latest_version(config, schema) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: [[version]]} =
+        Postgrex.query!(
+          conn,
+          """
+          SELECT concat_ws('.', major_version, minor_version, patch_version)
+          FROM "#{schema}".schema_migrations
+          ORDER BY major_version DESC, minor_version DESC, patch_version DESC
+          LIMIT 1
+          """,
+          []
+        )
+
+      version
+    end)
+  end
+
+  defp migration_history(config, schema) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: rows} =
+        Postgrex.query!(
+          conn,
+          ~s(SELECT * FROM "#{schema}".schema_migrations ORDER BY 1, 2, 3),
+          []
+        )
+
+      rows
+    end)
+  end
+
+  defp with_conn(config, fun) do
+    {:ok, conn} = Postgrex.start_link(config)
+
+    try do
+      fun.(conn)
+    after
+      GenServer.stop(conn)
+    end
+  end
+
   defp split_and_normalize(enumerable) do
     enumerable
     |> Enum.join()
