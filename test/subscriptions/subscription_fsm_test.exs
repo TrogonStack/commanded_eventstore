@@ -179,7 +179,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       drop_privileges_after_update(context)
 
-      assert %SubscriptionFsm{} = SubscriptionFsm.checkpoint(fsm)
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 1}} =
+               SubscriptionFsm.checkpoint(fsm)
 
       # Claiming the lock again would recreate a row that a delete removed, so only a probe that
       # found the row may send the subscription to do that.
@@ -214,6 +215,51 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       # A write that failed is not a row that is gone, and stopping over one would turn every
       # blip in storage into a subscription that has to be restarted.
       refute_received {:checkpoint_failed, _reason}
+    end
+
+    test "writes a position whose earlier write failed on the next checkpoint", context do
+      fsm = fsm(context, checkpoints_pending: 1, last_ack: 3, schema: "no_such_schema")
+
+      %SubscriptionFsm{data: data} = SubscriptionFsm.checkpoint(fsm)
+
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
+               SubscriptionFsm.checkpoint(fsm)
+
+      assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
+    end
+
+    test "retries a failed write once the checkpoint interval has passed", context do
+      fsm =
+        fsm(context,
+          checkpoints_pending: 1,
+          last_ack: 3,
+          schema: "no_such_schema",
+          checkpoint_after: 30_000
+        )
+
+      %SubscriptionFsm{data: %SubscriptionState{checkpoint_timer_ref: timer}} =
+        SubscriptionFsm.checkpoint(fsm)
+
+      assert is_reference(timer)
+      assert Process.read_timer(timer) in 1..30_000
+    end
+
+    test "retries a failed write after the retry interval when it writes on every ack", context do
+      fsm =
+        fsm(context,
+          checkpoints_pending: 1,
+          last_ack: 3,
+          schema: "no_such_schema",
+          retry_interval: 45_000
+        )
+
+      %SubscriptionFsm{data: %SubscriptionState{checkpoint_timer_ref: timer}} =
+        SubscriptionFsm.checkpoint(fsm)
+
+      assert is_reference(timer)
+      assert Process.read_timer(timer) in 30_001..45_000
     end
 
     test "writes from every state that owns a position", context do
@@ -416,6 +462,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       fencing_token: context.fencing_token,
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
+      checkpoint_after: Keyword.get(overrides, :checkpoint_after, 0),
       query_timeout: 15_000,
       event_store: TestEventStore,
       serializer: context.serializer,
