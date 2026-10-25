@@ -636,6 +636,80 @@ defmodule EventStore.AdvisoryLocksTest do
       assert_receive {AdvisoryLocks, :lock_released, ^lock, :session_ended}, 1_000
     end
 
+    test "should keep retrying verification until a session that cannot answer recovers",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      send(@locks, {:connected, lock_connection})
+      send(@locks, {:disconnected, lock_connection})
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, :session_ended}
+
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      # The first retry fails too, so only a retry it schedules itself can unlock.
+      Wait.until(3_000, fn ->
+        assert %{verify_timer: retry} = :sys.get_state(@locks)
+        assert is_reference(retry) and retry != timer
+      end)
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+
+      Wait.until(5_000, fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
+    test "should keep a single verification retry pending while reconnect queries fail" do
+      {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      # Each failed verification would otherwise start another polling loop.
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: ^timer} = :sys.get_state(@locks)
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+    end
+
+    test "should keep retrying an unlock that fails on a session that answers",
+         %{conn: conn, schema: schema} do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      # The unlock resolves the subscriptions table by name while the session query
+      # does not, so the session is confirmed but its unlock cannot complete.
+      Postgrex.query!(conn, "ALTER TABLE subscriptions RENAME TO hidden_subscriptions", [])
+
+      try do
+        :ok = AdvisoryLocks.release(@locks, lock)
+
+        Wait.until(fn -> refute Enum.empty?(:sys.get_state(@locks).released) end)
+      after
+        Postgrex.query!(conn, "ALTER TABLE hidden_subscriptions RENAME TO subscriptions", [])
+      end
+
+      Wait.until(5_000, fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+
     test "should send `lock_released` message when the lock connection crashes" do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
