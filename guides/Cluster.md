@@ -14,6 +14,8 @@ The lock decides which node may record the subscription's progress, not which no
 
 Subscribers must therefore be idempotent, as they are for any at-least-once delivery. This protection takes effect once every node runs a version that records lock generations; until then, nodes on an older version behave as before.
 
+When the lock connection stalls, each attempt a subscription makes to take its lock waits for up to the event store's `timeout` (15 seconds by default), and the subscription makes another attempt every `:subscription_retry_interval` for as long as the connection stays stalled. A subscriber that calls `ack/2` on that subscription during an attempt can exit with a `:timeout` after the default 5 second call timeout, and that exposure comes back on every retry, so acks can keep timing out for far longer than a single `timeout`. The subscription's position is unaffected: a subscription waiting for its lock ignores those acks anyway, and it resumes from the last committed checkpoint once it holds the lock again. Subscribers that ack from a process that must not crash should catch that exit.
+
 ## Automatic cluster formation
 
 You can use [libcluster](https://github.com/bitwalker/libcluster) to automatically form clusters of Erlang nodes, with either static or dynamic node membership.
