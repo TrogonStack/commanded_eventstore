@@ -16,7 +16,14 @@ Without these grants, persistent subscriptions never subscribe and the node logs
 
 ## Migrate before rolling nodes
 
-Run the migration before starting nodes on the new version. A node on a version that expects a newer schema cannot acquire subscription locks against an unmigrated database and keeps retrying until the migration has run. Nodes on the previous version keep working against the migrated schema, so a rolling upgrade is safe once the migration is in place.
+Run the migration before starting nodes on the new version. A node on a version that expects a newer schema cannot acquire subscription locks against an unmigrated database and keeps retrying until the migration has run. Nodes on the previous version keep working against the migrated schema once the migration is in place.
+
+While versions are mixed, the lock generation fencing described in [Running on a cluster of nodes](Cluster.md) only holds between nodes that run 1.5.0 or later. A node on 1.4.x neither moves the generation on when it takes a lock nor checks it when it acks, so during the rollout:
+
+- a 1.4.x node that lost its lock can still ack, and its write can move the new owner's position backwards;
+- a 1.5.0 node that lost its lock to a 1.4.x node is not fenced, because the generation it holds is still current.
+
+Both need a node that keeps running after its lock session ended, such as one cut off from the database, while another node takes the lock. A node that shuts down cleanly stops its subscriptions before its locks are released, so restart nodes one at a time with a clean shutdown and keep the mixed-version window short. When a subscription must never record a position from a stale node, stop every node and start them all on the new version instead.
 
 ## Migrating a database with `mix`
 
