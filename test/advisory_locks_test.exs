@@ -921,42 +921,8 @@ defmodule EventStore.AdvisoryLocksTest do
   describe "release a lock while the lock connection cannot answer" do
     @tag capture_log: true
     test "should retry the unlock until the lock is released", %{conn: conn, schema: schema} do
-      alias EventStore.Storage.Session
-
-      locks_name = Module.concat([__MODULE__, ReleaseWithoutSession, AdvisoryLocks])
+      locks_name = start_impatient_lock_server(ReleaseWithoutSession, schema)
       conn_name = Module.concat([locks_name, Postgrex])
-      monitor_name = Module.concat([conn_name, MonitoredServer])
-
-      config = Config.parsed(TestEventStore, :eventstore)
-
-      postgrex_config =
-        config
-        |> Config.advisory_locks_postgrex_opts()
-        |> Config.add_connection_listener(locks_name)
-        |> Keyword.put(:name, conn_name)
-        |> Keyword.merge(queue_target: 1, queue_interval: 1)
-
-      start_supervised!(
-        {MonitoredServer,
-         mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
-        id: monitor_name
-      )
-
-      start_supervised!(
-        {AdvisoryLocks,
-         conn: conn_name,
-         event_store: TestEventStore,
-         monitor: monitor_name,
-         query_timeout: 100,
-         schema: schema,
-         name: locks_name}
-      )
-
-      # The startup replacement of the pre-registration connection settles once a
-      # session answers, so the lock rides a connection that survives.
-      Wait.until(5_000, fn ->
-        assert {:ok, _session} = Session.current(conn_name, timeout: 100)
-      end)
 
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
 
@@ -979,6 +945,84 @@ defmodule EventStore.AdvisoryLocksTest do
         assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
       end)
     end
+
+    @tag capture_log: true
+    test "should retry the unlock of an owner that terminates until the lock is released",
+         %{conn: conn, schema: schema} do
+      locks_name = start_impatient_lock_server(OwnerDownWithoutSession, schema)
+      conn_name = Module.concat([locks_name, Postgrex])
+      reply_to = self()
+
+      owner =
+        spawn(fn ->
+          send(reply_to, {:lock, AdvisoryLocks.try_advisory_lock(locks_name, 1)})
+
+          receive do
+            :shutdown -> :ok
+          end
+        end)
+
+      assert_receive {:lock, {:ok, _lock}}
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+
+      holder = hold_only_connection(conn_name)
+
+      try do
+        send(owner, :shutdown)
+
+        Wait.until(fn -> assert map_size(:sys.get_state(locks_name).locks) == 0 end)
+      after
+        send(holder, :release)
+      end
+
+      Wait.until(5_000, fn ->
+        assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
+      end)
+    end
+  end
+
+  # A lock server whose queries give up on a busy connection almost at once.
+  defp start_impatient_lock_server(name, schema) do
+    alias EventStore.Storage.Session
+
+    locks_name = Module.concat([__MODULE__, name, AdvisoryLocks])
+    conn_name = Module.concat([locks_name, Postgrex])
+    monitor_name = Module.concat([conn_name, MonitoredServer])
+
+    config = Config.parsed(TestEventStore, :eventstore)
+
+    postgrex_config =
+      config
+      |> Config.advisory_locks_postgrex_opts()
+      |> Config.add_connection_listener(locks_name)
+      |> Keyword.put(:name, conn_name)
+      |> Keyword.merge(queue_target: 1, queue_interval: 1)
+
+    start_supervised!(
+      {MonitoredServer,
+       mfa: {Postgrex, :start_link, [postgrex_config]}, name: monitor_name, backoff_min: 30_000},
+      id: monitor_name
+    )
+
+    start_supervised!(
+      {AdvisoryLocks,
+       conn: conn_name,
+       event_store: TestEventStore,
+       monitor: monitor_name,
+       query_timeout: 100,
+       schema: schema,
+       name: locks_name}
+    )
+
+    # The startup replacement of the pre-registration connection settles once a
+    # session answers, so the lock rides a connection that survives.
+    Wait.until(5_000, fn ->
+      assert {:ok, _session} = Session.current(conn_name, timeout: 100)
+    end)
+
+    locks_name
   end
 
   defp start_lock_owner(key) do
