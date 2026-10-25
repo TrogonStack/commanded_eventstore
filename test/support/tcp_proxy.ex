@@ -30,6 +30,17 @@ defmodule EventStore.TcpProxy do
   """
   def freeze(proxy), do: GenServer.call(proxy, :freeze)
 
+  @doc """
+  Closes each connection already piped as soon as either end sends anything,
+  without relaying it, and holds new connections like `blackhole/1`.
+  """
+  def sever(proxy), do: GenServer.call(proxy, :sever)
+
+  @doc """
+  Counts the connections `sever/1` has closed.
+  """
+  def severed(proxy), do: GenServer.call(proxy, :severed)
+
   def stop(proxy), do: GenServer.stop(proxy)
 
   @impl GenServer
@@ -53,13 +64,29 @@ defmodule EventStore.TcpProxy do
        port: listen_port,
        mode: :forward,
        held: [],
-       relays: []
+       relays: [],
+       severing: MapSet.new(),
+       severed: 0
      }}
   end
 
   @impl GenServer
   def handle_call(:port, _from, state), do: {:reply, state.port, state}
   def handle_call(:mode, _from, state), do: {:reply, state.mode, state}
+
+  def handle_call({:mode, relay}, _from, state) do
+    if MapSet.member?(state.severing, relay) do
+      {:reply, :severed,
+       %{state | severing: MapSet.delete(state.severing, relay), severed: state.severed + 1}}
+    else
+      {:reply, state.mode, state}
+    end
+  end
+
+  def handle_call(:sever, _from, state),
+    do: {:reply, :ok, %{state | mode: :blackhole, severing: MapSet.new(state.relays)}}
+
+  def handle_call(:severed, _from, state), do: {:reply, state.severed, state}
   def handle_call(:blackhole, _from, state), do: {:reply, :ok, %{state | mode: :blackhole}}
 
   def handle_call({:hold, client}, _from, state),
@@ -137,10 +164,10 @@ defmodule EventStore.TcpProxy do
           relay(from, to, proxy, deadline)
 
         {:ok, data} ->
-          if deadline == :infinity and GenServer.call(proxy, :mode) == :frozen do
-            park(from, to, [data])
-          else
-            forward_data(from, to, proxy, deadline, data)
+          case relay_mode(proxy, deadline) do
+            :frozen -> park(from, to, [data])
+            :severed -> close(from, to)
+            _mode -> forward_data(from, to, proxy, deadline, data)
           end
 
         {:error, _reason} ->
@@ -152,6 +179,9 @@ defmodule EventStore.TcpProxy do
       end
     end
   end
+
+  defp relay_mode(proxy, :infinity), do: GenServer.call(proxy, {:mode, self()})
+  defp relay_mode(_proxy, _deadline), do: :forward
 
   defp expired?(:infinity), do: false
   defp expired?(deadline), do: System.monotonic_time(:millisecond) > deadline
