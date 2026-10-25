@@ -14,7 +14,7 @@ GRANT SELECT, UPDATE ON "public".subscriptions TO session_mode_role;
 
 Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges.
 
-Migrations added by this fork are recorded in a `trogon_schema_migrations` table, apart from the upstream migrations in `schema_migrations`, and `mix event_store.migrations` lists them with a `trogon/` prefix. A version released upstream can therefore never be skipped because of a fork migration, nor the other way around.
+Migrations added by this fork are recorded in a `trogon_schema_migrations` table, apart from the upstream migrations in `schema_migrations`, and `mix event_store.migrations` lists them with a `trogon/` prefix. A version released upstream can therefore never be skipped because of a fork migration, nor the other way around. A database migrated by a build of this fork from before that split has its `1.5.0` row in `schema_migrations`; the 1.5.0 migration moves that row to `trogon_schema_migrations`.
 
 ## Migrate before rolling nodes
 
