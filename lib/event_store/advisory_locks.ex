@@ -406,10 +406,8 @@ defmodule EventStore.AdvisoryLocks do
         nil ->
           state
 
-        %Lock{key: key} ->
-          release_lock(key, state)
-
-          %State{state | locks: Map.delete(locks, ref)}
+        %Lock{} = lock ->
+          release_held_lock(lock, %State{state | locks: Map.delete(locks, ref)})
       end
 
     {:noreply, state}
