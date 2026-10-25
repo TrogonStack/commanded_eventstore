@@ -490,28 +490,8 @@ defmodule EventStore.AdvisoryLocksTest do
 
     test "should send `lock_released` message when the database stops answering new connections",
          %{conn: conn, schema: schema} do
-      name = :proxied_lock_store
-      locks = Module.concat([name, AdvisoryLocks])
+      {locks, proxy} = start_proxied_lock_store(:proxied_lock_store, schema, idle_interval: 100)
       lock_pool = Module.concat([locks, Postgrex])
-
-      config = Config.parsed(TestEventStore, :eventstore)
-
-      proxy =
-        start_supervised!(
-          {EventStore.TcpProxy,
-           {Keyword.fetch!(config, :hostname), Keyword.fetch!(config, :port)}}
-        )
-
-      start_supervised!(
-        {TestEventStore,
-         name: name,
-         schema: schema,
-         session_mode_pool: [
-           port: EventStore.TcpProxy.port(proxy),
-           timeout: 60_000,
-           idle_interval: 100
-         ]}
-      )
 
       try do
         {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
@@ -981,6 +961,86 @@ defmodule EventStore.AdvisoryLocksTest do
         assert :ok = Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
       end)
     end
+  end
+
+  describe "lock connection stops answering while a lock query waits on it" do
+    @tag capture_log: true
+    test "should send `lock_released` message without waiting for the connection to finish closing",
+         %{schema: schema} do
+      {locks, proxy} =
+        start_proxied_lock_store(:stalled_lock_store, schema, idle_interval: 60_000)
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        :ok = EventStore.TcpProxy.freeze(proxy)
+
+        spawn(fn -> AdvisoryLocks.try_advisory_lock(locks, 2, 500) end)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 5_000
+      after
+        stop_supervised!(EventStore.TcpProxy)
+      end
+    end
+
+    @tag capture_log: true
+    test "should send `lock_released` message before answering the calls queued behind the query",
+         %{schema: schema} do
+      {locks, proxy} = start_proxied_lock_store(:queued_lock_store, schema, idle_interval: 60_000)
+      server = Process.whereis(locks)
+      test_process = self()
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        :ok = EventStore.TcpProxy.freeze(proxy)
+
+        spawn(fn -> AdvisoryLocks.try_advisory_lock(locks, 2, 2_000) end)
+
+        Wait.until(fn -> assert {:timeout, _} = catch_exit(:sys.get_state(server, 10)) end)
+
+        spawn(fn ->
+          send(test_process, {:queued_reply, AdvisoryLocks.try_advisory_lock(locks, 3, 20_000)})
+        end)
+
+        Wait.until(fn ->
+          {:messages, messages} = Process.info(server, :messages)
+
+          assert Enum.any?(
+                   messages,
+                   &match?({:"$gen_call", _from, {:try_advisory_lock, 3, _, _}}, &1)
+                 )
+        end)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 10_000
+        refute_received {:queued_reply, _reply}
+      after
+        stop_supervised!(EventStore.TcpProxy)
+      end
+    end
+  end
+
+  # An event store whose lock connection goes through a proxy that can stop answering.
+  defp start_proxied_lock_store(name, schema, session_mode_pool_opts) do
+    config = Config.parsed(TestEventStore, :eventstore)
+
+    proxy =
+      start_supervised!(
+        {EventStore.TcpProxy, {Keyword.fetch!(config, :hostname), Keyword.fetch!(config, :port)}}
+      )
+
+    start_supervised!(
+      {TestEventStore,
+       name: name,
+       schema: schema,
+       session_mode_pool:
+         Keyword.merge(
+           [port: EventStore.TcpProxy.port(proxy), timeout: 60_000],
+           session_mode_pool_opts
+         )}
+    )
+
+    {Module.concat([name, AdvisoryLocks]), proxy}
   end
 
   # A lock server whose queries give up on a busy connection almost at once.
