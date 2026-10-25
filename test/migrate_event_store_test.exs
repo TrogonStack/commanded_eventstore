@@ -67,6 +67,89 @@ defmodule EventStore.MigrateEventStoreTest do
     end
   end
 
+  describe "fork migrations" do
+    test "run on a database whose upstream history records the same version", %{config: config} do
+      create_new_database(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+        Postgrex.query!(conn, "DROP TABLE IF EXISTS trogon_schema_migrations", [])
+
+        Postgrex.query!(
+          conn,
+          """
+          INSERT INTO schema_migrations (major_version, minor_version, patch_version)
+          VALUES (1, 5, 0) ON CONFLICT DO NOTHING
+          """,
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert has_lock_generation?(config)
+    end
+
+    test "leave the upstream version history at the last upstream migration", %{config: config} do
+      restore_pre_migration_event_store(config)
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert "1.3.2" == latest_upstream_version(config)
+
+      create_new_database(config)
+
+      assert "1.3.2" == latest_upstream_version(config)
+    end
+  end
+
+  defp has_lock_generation?(config) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: [[exists]]} =
+        Postgrex.query!(
+          conn,
+          """
+          SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+            AND table_name = 'subscriptions'
+            AND column_name = 'lock_generation'
+          )
+          """,
+          []
+        )
+
+      exists
+    end)
+  end
+
+  defp latest_upstream_version(config) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: [[version]]} =
+        Postgrex.query!(
+          conn,
+          """
+          SELECT concat_ws('.', major_version, minor_version, patch_version)
+          FROM schema_migrations
+          ORDER BY major_version DESC, minor_version DESC, patch_version DESC
+          LIMIT 1
+          """,
+          []
+        )
+
+      version
+    end)
+  end
+
+  defp with_conn(config, fun) do
+    {:ok, conn} = Postgrex.start_link(config)
+
+    try do
+      fun.(conn)
+    after
+      GenServer.stop(conn)
+    end
+  end
+
   defp split_and_normalize(enumerable) do
     enumerable
     |> Enum.join()
