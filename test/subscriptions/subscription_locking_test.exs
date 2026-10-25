@@ -211,12 +211,17 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
       :ok = release_lock(subscription, old_lock_ref)
       :ok = reconnect(subscription)
 
-      _new_lock_ref = wait_for_new_lock_ref(subscription, old_lock_ref)
+      new_lock_ref = wait_for_new_lock_ref(subscription, old_lock_ref)
+
+      Wait.until(fn -> assert :subscribed == subscription_state(subscription) end)
 
       :ok = release_lock(subscription, old_lock_ref)
 
       refute_receive {:DOWN, ^monitor_ref, :process, ^subscription, _reason}, 200
       assert Process.alive?(subscription)
+
+      assert :subscribed == subscription_state(subscription)
+      assert new_lock_ref == lock_ref(subscription)
 
       append_events_to_stream(event_store, 3)
 
