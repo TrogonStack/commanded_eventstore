@@ -22,7 +22,8 @@ defmodule EventStore.Subscriptions.Subscription do
     :stream_uuid,
     :subscription_name,
     :subscription,
-    :retry_interval
+    :retry_interval,
+    :retry_timer
   ]
 
   def start_link(opts) do
@@ -116,7 +117,7 @@ defmodule EventStore.Subscriptions.Subscription do
   def handle_info(:subscribe_to_stream, %Subscription{} = state) do
     Logger.debug(describe(state) <> " subscribe to stream")
 
-    %Subscription{subscription: subscription} = state
+    %Subscription{subscription: subscription} = state = %Subscription{state | retry_timer: nil}
 
     state =
       subscription
@@ -339,11 +340,15 @@ defmodule EventStore.Subscriptions.Subscription do
          %Subscription{subscription: %SubscriptionFsm{state: fsm}} = state
        )
        when fsm in [:initial, :disconnected] do
-    %Subscription{retry_interval: retry_interval} = state
+    case state do
+      %Subscription{retry_timer: nil, retry_interval: retry_interval} ->
+        retry_timer = Process.send_after(self(), :subscribe_to_stream, retry_interval)
 
-    _ref = Process.send_after(self(), :subscribe_to_stream, retry_interval)
+        %Subscription{state | retry_timer: retry_timer}
 
-    state
+      %Subscription{} ->
+        state
+    end
   end
 
   defp handle_subscription_state(
