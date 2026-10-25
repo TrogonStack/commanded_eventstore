@@ -68,6 +68,55 @@ defmodule EventStore.MigrateEventStoreTest do
   end
 
   describe "fork migrations" do
+    test "move a fork version found in the upstream history into the fork history",
+         %{config: config} do
+      create_new_database(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(conn, "DROP TABLE trogon_schema_migrations", [])
+
+        Postgrex.query!(
+          conn,
+          """
+          INSERT INTO schema_migrations (major_version, minor_version, patch_version)
+          VALUES (1, 5, 0)
+          """,
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert [] == recorded_versions(config, "schema_migrations", "1.5.0")
+      assert ["1.5.0"] == recorded_versions(config, "trogon_schema_migrations", "1.5.0")
+      assert "1.3.2" == latest_upstream_version(config)
+    end
+
+    test "keep an upstream version the fork did not write in the upstream history",
+         %{config: config} do
+      create_new_database(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+        Postgrex.query!(conn, "DROP TABLE trogon_schema_migrations", [])
+
+        Postgrex.query!(
+          conn,
+          """
+          INSERT INTO schema_migrations (major_version, minor_version, patch_version)
+          VALUES (1, 5, 0)
+          """,
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert ["1.5.0"] == recorded_versions(config, "schema_migrations", "1.5.0")
+      assert ["1.5.0"] == recorded_versions(config, "trogon_schema_migrations", "1.5.0")
+      assert has_lock_generation?(config)
+    end
+
     test "run on a database whose upstream history records the same version", %{config: config} do
       create_new_database(config)
 
@@ -119,6 +168,23 @@ defmodule EventStore.MigrateEventStoreTest do
         )
 
       exists
+    end)
+  end
+
+  defp recorded_versions(config, table, version) do
+    with_conn(config, fn conn ->
+      %Postgrex.Result{rows: rows} =
+        Postgrex.query!(
+          conn,
+          """
+          SELECT concat_ws('.', major_version, minor_version, patch_version)
+          FROM #{table}
+          WHERE concat_ws('.', major_version, minor_version, patch_version) = $1
+          """,
+          [version]
+        )
+
+      List.flatten(rows)
     end)
   end
 
