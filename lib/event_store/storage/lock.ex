@@ -55,41 +55,22 @@ defmodule EventStore.Storage.Lock do
 
   @doc """
   Takes the advisory lock of a subscription and bumps its `lock_generation` in
-  the same statement, returning the lease that fences the subscription's
+  the same transaction, returning the lease that fences the subscription's
   progress writes to this lock owner.
   """
   def claim_subscription_lock(conn, subscription_id, opts) do
     {schema, opts} = Keyword.pop(opts, :schema)
 
-    query = Statements.claim_subscription_lock(schema)
-
-    reply =
-      with_bounded_lock_wait(conn, opts, fn conn ->
-        Postgrex.query(conn, query, [subscription_id], opts)
-      end)
-
-    case reply do
-      {:ok, %Postgrex.Result{rows: [[false, _backend_pid, _session_id, _generation, _last_seen]]}} ->
-        {:error, :lock_already_taken}
-
-      {:ok, %Postgrex.Result{rows: [[true, _backend_pid, _session_id, nil, nil]]}} ->
-        with :ok <- unlock(conn, subscription_id, [schema: schema] ++ opts) do
-          {:error, :subscription_not_found}
-        end
-
-      {:ok, %Postgrex.Result{rows: [[true, backend_pid, session_id, generation, last_seen]]}} ->
-        token = FencingToken.new(subscription_id, generation)
-
-        {:ok, Lease.new(token, last_seen, Session.new(backend_pid, session_id))}
-
-      {:error, %Postgrex.Error{} = error} ->
-        _ = unlock(conn, subscription_id, [schema: schema] ++ opts)
-
-        {:error, error}
-
-      {:error, %DBConnection.ConnectionError{}} = reply ->
-        reply
-    end
+    # Every wait happens before the advisory lock is tried, so a failed claim
+    # never has to give back a lock that may be a hold its owner already had.
+    with_bounded_lock_wait(conn, opts, fn conn ->
+      with {:ok, %FencingToken{} = token, last_seen} <-
+             bump_lock_generation(conn, subscription_id, schema, opts),
+           {:ok, %Session{} = session} <-
+             try_acquire_exclusive_session_lock(conn, subscription_id, [schema: schema] ++ opts) do
+        {:ok, Lease.new(token, last_seen, session)}
+      end
+    end)
   end
 
   def unlock(conn, key, opts) do
@@ -101,6 +82,21 @@ defmodule EventStore.Storage.Lock do
       {:ok, %Postgrex.Result{rows: [[true]]}} -> :ok
       {:ok, %Postgrex.Result{rows: [[false]]}} -> :ok
       {:error, _error} = reply -> reply
+    end
+  end
+
+  defp bump_lock_generation(conn, subscription_id, schema, opts) do
+    query = Statements.bump_lock_generation(schema)
+
+    case Postgrex.query(conn, query, [subscription_id], opts) do
+      {:ok, %Postgrex.Result{rows: [[generation, last_seen]]}} ->
+        {:ok, FencingToken.new(subscription_id, generation), last_seen}
+
+      {:ok, %Postgrex.Result{rows: []}} ->
+        {:error, :subscription_not_found}
+
+      {:error, _error} = reply ->
+        reply
     end
   end
 

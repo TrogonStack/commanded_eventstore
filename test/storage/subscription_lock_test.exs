@@ -90,7 +90,7 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     ProcessHelper.shutdown(other)
   end
 
-  test "a claim that fails after taking the advisory lock leaves the subscription claimable",
+  test "a claim that cannot lock the subscription row leaves the subscription claimable",
        context do
     %{postgrex_config: postgrex_config, conn: conn, schema: schema} = context
     %{subscription_id: subscription_id} = create_subscription(context)
