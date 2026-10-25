@@ -689,6 +689,38 @@ defmodule EventStore.AdvisoryLocksTest do
       Postgrex.query!(@conn, "ROLLBACK", [])
     end
 
+    test "should ignore a verification retry that is no longer pending" do
+      {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+      locks = Process.whereis(@locks)
+
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      # Nothing else talks to the lock server while the retry is pending, so the
+      # first message it receives is the retry firing.
+      :erlang.trace(locks, true, [:receive])
+      assert_receive {:trace, ^locks, :receive, retry}, 3_000
+      :erlang.trace(locks, false, [:receive])
+
+      assert %{verify_timer: pending} = :sys.get_state(@locks)
+      assert is_reference(pending) and pending != timer
+
+      # A retry that outlived its timer, such as one armed before the lock pool went
+      # down, would otherwise start a second polling loop next to the pending one.
+      send(@locks, retry)
+
+      assert %{verify_timer: ^pending} = :sys.get_state(@locks)
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+    end
+
     test "should keep retrying an unlock that fails on a session that answers",
          %{conn: conn, schema: schema} do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
