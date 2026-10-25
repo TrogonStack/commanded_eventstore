@@ -30,7 +30,9 @@ defmodule EventStore.Sql.Init do
       create_subscription_index(),
       create_snapshots_table(column_data_type),
       create_schema_migrations_table(),
-      record_event_store_schema_version()
+      record_event_store_schema_version(),
+      create_trogon_schema_migrations_table(),
+      record_trogon_schema_version()
     ]
   end
 
@@ -277,6 +279,28 @@ defmodule EventStore.Sql.Init do
   defp record_event_store_schema_version do
     """
     INSERT INTO schema_migrations (major_version, minor_version, patch_version)
+    VALUES (1, 3, 2);
+    """
+  end
+
+  # Migrations added by this fork are versioned apart from upstream's, see
+  # `EventStore.Tasks.MigrationTrack`.
+  defp create_trogon_schema_migrations_table do
+    """
+    CREATE TABLE trogon_schema_migrations
+    (
+        major_version int NOT NULL,
+        minor_version int NOT NULL,
+        patch_version int NOT NULL,
+        migrated_at timestamp with time zone DEFAULT NOW() NOT NULL,
+        PRIMARY KEY(major_version, minor_version, patch_version)
+    );
+    """
+  end
+
+  defp record_trogon_schema_version do
+    """
+    INSERT INTO trogon_schema_migrations (major_version, minor_version, patch_version)
     VALUES (1, 5, 0);
     """
   end

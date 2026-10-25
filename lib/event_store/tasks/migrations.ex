@@ -1,5 +1,16 @@
 defmodule EventStore.Tasks.Migration do
-  defstruct version: nil, state: :pending, migrated_at: nil
+  @moduledoc false
+
+  alias EventStore.Tasks.MigrationTrack
+
+  @type t :: %__MODULE__{
+          track: MigrationTrack.t(),
+          version: String.t(),
+          state: :pending | :completed,
+          migrated_at: DateTime.t() | nil
+        }
+
+  defstruct track: nil, version: nil, state: :pending, migrated_at: nil
 end
 
 defmodule EventStore.Tasks.Migrations do
@@ -10,20 +21,9 @@ defmodule EventStore.Tasks.Migrations do
   import EventStore.Tasks.Output
 
   alias EventStore.Config
-  alias EventStore.Tasks.Migration
+  alias EventStore.Tasks.{Migration, MigrationTrack}
 
-  @available_migrations [
-    "0.13.0",
-    "0.14.0",
-    "0.17.0",
-    "1.1.0",
-    "1.2.0",
-    "1.3.0",
-    "1.3.2",
-    "1.5.0"
-  ]
-
-  @dialyzer {:no_return, exec: 2, handle_response: 1}
+  @dialyzer {:no_return, exec: 2}
 
   @doc """
   Run task
@@ -56,15 +56,16 @@ defmodule EventStore.Tasks.Migrations do
     Enum.map(migrations, & &1.state)
   end
 
-  @doc false
-  def available_migrations(), do: @available_migrations
-
-  defp list_migration(%Migration{version: version, state: :pending}, opts) do
-    write_info("  #{version |> String.pad_trailing(10)}\tpending", opts)
+  defp list_migration(%Migration{state: :pending} = migration, opts) do
+    write_info("  #{label(migration)}\tpending", opts)
   end
 
-  defp list_migration(%Migration{version: version, state: :completed, migrated_at: time}, opts) do
-    write_info("  #{version |> String.pad_trailing(10)}\tcompleted\t#{time}", opts)
+  defp list_migration(%Migration{state: :completed, migrated_at: time} = migration, opts) do
+    write_info("  #{label(migration)}\tcompleted\t#{time}", opts)
+  end
+
+  defp label(%Migration{track: track, version: version}) do
+    track |> MigrationTrack.label(version) |> String.pad_trailing(10)
   end
 
   defp write_table_header(opts) do
@@ -77,49 +78,16 @@ defmodule EventStore.Tasks.Migrations do
   end
 
   defp migrations(config, schema) do
-    completed = query_schema_migrations(config, schema)
-    latest_migration = completed |> Enum.reverse() |> Enum.at(0, nil)
-
-    completed ++ pending_migrations(latest_migration)
-  end
-
-  defp pending_migrations(nil), do: @available_migrations
-
-  defp pending_migrations(%Migration{state: :completed, version: event_store_version}) do
-    @available_migrations
-    |> Enum.map(fn version -> %Migration{version: version} end)
-    |> Enum.filter(fn migration ->
-      Version.compare(migration.version, event_store_version) == :gt
-    end)
-  end
-
-  defp query_schema_migrations(config, schema) do
-    config
-    |> run_query("""
-      SELECT major_version, minor_version, patch_version, migrated_at
-      FROM "#{schema}".schema_migrations
-      ORDER BY 1, 2, 3
-    """)
-    |> handle_response()
-  end
-
-  defp run_query(config, query) do
     {:ok, conn} = Postgrex.start_link(config)
 
     try do
-      Postgrex.query!(conn, query, [])
+      Enum.flat_map(MigrationTrack.all(), fn track ->
+        completed = MigrationTrack.completed(conn, schema, track)
+
+        completed ++ MigrationTrack.pending(track, completed)
+      end)
     after
       GenServer.stop(conn)
     end
-  end
-
-  defp handle_response(%Postgrex.Result{rows: rows}) do
-    Enum.map(rows, fn [major_version, minor_version, patch_version, migrated_at] ->
-      %Migration{
-        version: "#{major_version}.#{minor_version}.#{patch_version}",
-        state: :completed,
-        migrated_at: migrated_at
-      }
-    end)
   end
 end

@@ -14,6 +14,8 @@ GRANT SELECT, UPDATE ON "public".subscriptions TO session_mode_role;
 
 Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges.
 
+Migrations added by this fork are recorded in a `trogon_schema_migrations` table, apart from the upstream migrations in `schema_migrations`, and `mix event_store.migrations` lists them with a `trogon/` prefix. A version released upstream can therefore never be skipped because of a fork migration, nor the other way around.
+
 ## Migrate before rolling nodes
 
 Run the migration before starting nodes on the new version. A node on a version that expects a newer schema cannot acquire subscription locks against an unmigrated database and keeps retrying until the migration has run. Nodes on the previous version keep working against the migrated schema, so a rolling upgrade is safe once the migration is in place.

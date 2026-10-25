@@ -6,9 +6,9 @@ defmodule EventStore.Tasks.Migrate do
   import EventStore.Tasks.Output
 
   alias EventStore.{Config, Storage}
-  alias EventStore.Tasks.Migrations
+  alias EventStore.Tasks.{Migration, MigrationTrack}
 
-  @dialyzer {:no_return, exec: 2, handle_response: 1}
+  @dialyzer {:no_return, exec: 2}
 
   @doc """
   Run task
@@ -32,7 +32,7 @@ defmodule EventStore.Tasks.Migrate do
       {:ok, conn} = Postgrex.start_link(config)
 
       try do
-        migrations = available_migrations(conn, schema)
+        migrations = pending_migrations(conn, schema)
 
         migrate(conn, schema, opts, migrations)
       after
@@ -69,18 +69,10 @@ defmodule EventStore.Tasks.Migrate do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
   end
 
-  defp available_migrations(conn, schema) do
-    case event_store_schema_version(conn, schema) do
-      %Version{} = event_store_version ->
-        # Only run newer migrations
-        Enum.filter(Migrations.available_migrations(), fn migration_version ->
-          migration_version |> Version.parse!() |> Version.compare(event_store_version) == :gt
-        end)
-
-      nil ->
-        # Run all migrations
-        Migrations.available_migrations()
-    end
+  defp pending_migrations(conn, schema) do
+    Enum.flat_map(MigrationTrack.all(), fn track ->
+      MigrationTrack.pending(track, MigrationTrack.completed(conn, schema, track))
+    end)
   end
 
   defp migrate(_conn, _schema, opts, []) do
@@ -88,11 +80,10 @@ defmodule EventStore.Tasks.Migrate do
   end
 
   defp migrate(conn, schema, opts, migrations) do
-    for migration <- migrations do
-      write_info("Running migration v#{migration}...", opts)
+    for %Migration{track: track, version: version} <- migrations do
+      write_info("Running migration #{MigrationTrack.label(track, "v" <> version)}...", opts)
 
-      path = Application.app_dir(:eventstore, "priv/event_store/migrations/v#{migration}.sql")
-      script = File.read!(path)
+      script = track |> MigrationTrack.script_path(version) |> File.read!()
 
       statements = [
         ~s(SET LOCAL search_path TO "#{schema}";),
@@ -115,30 +106,6 @@ defmodule EventStore.Tasks.Migrate do
     write_info("The EventStore database has been migrated.", opts)
   end
 
-  defp event_store_schema_version(conn, schema) do
-    conn
-    |> query_schema_migrations(schema)
-    |> Enum.sort(fn left, right ->
-      case Version.compare(left, right) do
-        :gt -> true
-        _ -> false
-      end
-    end)
-    |> Enum.at(0)
-  end
-
-  defp query_schema_migrations(conn, schema) do
-    Postgrex.query!(
-      conn,
-      """
-        SELECT major_version, minor_version, patch_version
-        FROM "#{schema}".schema_migrations
-      """,
-      []
-    )
-    |> handle_response()
-  end
-
   defp transaction(conn, statements) do
     opts = [timeout: :infinity]
 
@@ -149,13 +116,5 @@ defmodule EventStore.Tasks.Migrate do
       end,
       opts
     )
-  end
-
-  defp handle_response(%Postgrex.Result{num_rows: 0}), do: []
-
-  defp handle_response(%Postgrex.Result{rows: rows}) do
-    Enum.map(rows, fn [major_version, minor_version, patch_version] ->
-      Version.parse!("#{major_version}.#{minor_version}.#{patch_version}")
-    end)
   end
 end

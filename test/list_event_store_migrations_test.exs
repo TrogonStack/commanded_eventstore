@@ -26,7 +26,7 @@ defmodule EventStore.ListEventStoreMigrationsTest do
         1.2.0     \tpending
         1.3.0     \tpending
         1.3.2     \tpending
-        1.5.0     \tpending
+        trogon/1.5.0\tpending
 
       """
 
