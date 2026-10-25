@@ -84,20 +84,18 @@ defmodule EventStore.AdvisoryLocks do
   defmodule Lock do
     @moduledoc false
 
-    alias EventStore.Storage.Lock.Lease, as: StorageLease
     alias EventStore.Storage.Session
 
     @type t :: %Lock{
             key: non_neg_integer(),
             owner: pid(),
             ref: reference(),
-            session: Session.t(),
-            lease: StorageLease.t() | nil
+            session: Session.t()
           }
-    defstruct [:key, :owner, :ref, :session, :lease]
+    defstruct [:key, :owner, :ref, :session]
 
-    def new(key, owner, %Session{} = session, lease \\ nil) do
-      %Lock{key: key, owner: owner, ref: make_ref(), session: session, lease: lease}
+    def new(key, owner, %Session{} = session) do
+      %Lock{key: key, owner: owner, ref: make_ref(), session: session}
     end
 
     def ref(%Lock{ref: ref}), do: ref
@@ -266,7 +264,7 @@ defmodule EventStore.AdvisoryLocks do
     case {held_lock(state, subscription_id, owner),
           claim_subscription_lock(subscription_id, timeout, state)} do
       {nil, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
-        lock = Lock.new(subscription_id, owner, session, lease)
+        lock = Lock.new(subscription_id, owner, session)
         state = monitor_acquired_lock(lock, state)
 
         {:reply, {:ok, Lease.new(Lock.ref(lock), lease)}, state}
@@ -277,7 +275,7 @@ defmodule EventStore.AdvisoryLocks do
 
         if Lock.held_by?(held, session), do: release_lock(key, state)
 
-        lock = %Lock{held | session: session, lease: lease}
+        lock = %Lock{held | session: session}
 
         {:reply, {:ok, Lease.new(ref, lease)},
          %State{state | locks: Map.put(locks, owner_ref, lock)}}
