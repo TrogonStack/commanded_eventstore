@@ -369,13 +369,18 @@ defmodule EventStore.AdvisoryLocks do
 
     notify_lost_locks(locks, reason)
 
-    {:noreply, %State{state | connection: nil, locks: %{}, released: [], verify_timer: nil}}
+    state = cancel_verify_retry(state)
+
+    {:noreply, %State{state | connection: nil, locks: %{}, released: []}}
   end
 
   # A session that could not be verified never reported a disconnect, so the
   # pending unlocks are reconciled again once it can answer.
-  def handle_info(:verify_sessions, %State{} = state),
+  def handle_info({:timeout, ref, :verify_sessions}, %State{verify_timer: ref} = state),
     do: {:noreply, verify_sessions(%State{state | verify_timer: nil})}
+
+  # A retry already cancelled or replaced would otherwise poll alongside the pending one.
+  def handle_info({:timeout, _ref, :verify_sessions}, %State{} = state), do: {:noreply, state}
 
   # The connection pool outlives its connections, so a reconnect replaces the
   # session that held the locks without the pool going down.
@@ -511,7 +516,15 @@ defmodule EventStore.AdvisoryLocks do
   defp schedule_verify_retry(%State{verify_timer: ref} = state) when is_reference(ref), do: state
 
   defp schedule_verify_retry(%State{} = state),
-    do: %State{state | verify_timer: Process.send_after(self(), :verify_sessions, @verify_retry)}
+    do: %State{state | verify_timer: :erlang.start_timer(@verify_retry, self(), :verify_sessions)}
+
+  defp cancel_verify_retry(%State{verify_timer: nil} = state), do: state
+
+  defp cancel_verify_retry(%State{verify_timer: ref} = state) do
+    :erlang.cancel_timer(ref)
+
+    %State{state | verify_timer: nil}
+  end
 
   defp notify_lost_locks(locks, _reason) when map_size(locks) == 0, do: :ok
 
