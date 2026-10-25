@@ -18,6 +18,7 @@ defmodule EventStore.AdvisoryLocks do
     defstruct [
       :conn,
       :connection,
+      :event_store,
       :lost_connection,
       :monitor,
       :query_timeout,
@@ -25,16 +26,58 @@ defmodule EventStore.AdvisoryLocks do
       :schema,
       :verify_timer,
       locks: %{},
-      released: []
+      released: [],
+      reported_claim_problems: MapSet.new()
     ]
 
     def new(opts) do
       conn = Keyword.fetch!(opts, :conn)
+      event_store = Keyword.fetch!(opts, :event_store)
       monitor = Keyword.fetch!(opts, :monitor)
       query_timeout = Keyword.fetch!(opts, :query_timeout)
       schema = Keyword.fetch!(opts, :schema)
 
-      %State{conn: conn, monitor: monitor, query_timeout: query_timeout, schema: schema}
+      %State{
+        conn: conn,
+        event_store: event_store,
+        monitor: monitor,
+        query_timeout: query_timeout,
+        schema: schema
+      }
+    end
+  end
+
+  defmodule ClaimProblem do
+    @moduledoc false
+
+    # A claim that fails on the schema or on the lock role's grants keeps failing
+    # on every retry until an operator acts, so it is reported to them.
+
+    @type t :: :schema_outdated | :missing_grants
+
+    @spec from_error(Postgrex.Error.t()) :: {:ok, t()} | :error
+    def from_error(%Postgrex.Error{postgres: %{code: :undefined_column}}),
+      do: {:ok, :schema_outdated}
+
+    def from_error(%Postgrex.Error{postgres: %{code: :insufficient_privilege}}),
+      do: {:ok, :missing_grants}
+
+    def from_error(%Postgrex.Error{}), do: :error
+
+    @spec message(t(), event_store :: atom(), schema :: String.t(), Postgrex.Error.t()) ::
+            String.t()
+    def message(:schema_outdated, event_store, _schema, error) do
+      "EventStore #{inspect(event_store)} cannot start persistent subscriptions because " <>
+        "its database schema predates v1.5.0. Run `mix event_store.migrate` (or " <>
+        "`EventStore.Tasks.Migrate.exec/2`); subscriptions keep retrying until then. " <>
+        "Reason: " <> Exception.message(error)
+    end
+
+    def message(:missing_grants, event_store, schema, error) do
+      "EventStore #{inspect(event_store)} cannot start persistent subscriptions because " <>
+        "the role of its session mode connection lacks privileges on " <>
+        ~s("#{schema}".subscriptions. Grant it SELECT and UPDATE on that table; ) <>
+        "subscriptions keep retrying until then. Reason: " <> Exception.message(error)
     end
   end
 
@@ -104,7 +147,7 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   alias DBConnection.ConnectionError
-  alias EventStore.AdvisoryLocks.{Connection, Lease, Lock, State}
+  alias EventStore.AdvisoryLocks.{ClaimProblem, Connection, Lease, Lock, State}
   alias EventStore.Storage
   alias EventStore.Storage.Session
 
@@ -236,6 +279,9 @@ defmodule EventStore.AdvisoryLocks do
         {:reply, {:ok, Lease.new(ref, lease)},
          %State{state | locks: Map.put(locks, owner_ref, lock)}}
 
+      {_held, {:error, %Postgrex.Error{} = error} = reply} ->
+        {:reply, reply, report_claim_problem(error, state)}
+
       {_held, reply} ->
         {:reply, reply, state}
     end
@@ -268,6 +314,19 @@ defmodule EventStore.AdvisoryLocks do
         timeout: timeout
       )
     end)
+  end
+
+  defp report_claim_problem(%Postgrex.Error{} = error, %State{} = state) do
+    %State{event_store: event_store, schema: schema, reported_claim_problems: reported} = state
+
+    with {:ok, problem} <- ClaimProblem.from_error(error),
+         false <- MapSet.member?(reported, problem) do
+      Logger.error(ClaimProblem.message(problem, event_store, schema, error))
+
+      %State{state | reported_claim_problems: MapSet.put(reported, problem)}
+    else
+      _reported_or_transient -> state
+    end
   end
 
   defp held_lock(%State{locks: locks}, key, owner) do
