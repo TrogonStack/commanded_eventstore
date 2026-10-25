@@ -28,6 +28,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         checkpoint_after: opts[:checkpoint_after] || 0,
         checkpoint_threshold: opts[:checkpoint_threshold] || 1,
         query_timeout: opts[:query_timeout] || 15_000,
+        checkout_opts: Keyword.get(opts, :checkout_opts, []),
         telemetry_metadata: Keyword.get(opts, :telemetry_metadata, %{}),
         max_size: opts[:max_size] || 1_000,
         transient: Keyword.get(opts, :transient, false)
@@ -217,18 +218,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   # A subscription creates its own row when it subscribes, so deleting that row is the
   # subscription's to do as well.
   def delete(%__MODULE__{data: %SubscriptionState{} = data} = fsm) do
-    %SubscriptionState{
-      conn: conn,
-      schema: schema,
-      stream_uuid: stream_uuid,
-      subscription_name: subscription_name,
-      query_timeout: query_timeout
-    } = data
+    %SubscriptionState{conn: conn, stream_uuid: stream_uuid, subscription_name: subscription_name} =
+      data
 
     reply =
-      Storage.Subscription.delete_subscription(conn, stream_uuid, subscription_name,
-        schema: schema,
-        timeout: query_timeout
+      Storage.Subscription.delete_subscription(
+        conn,
+        stream_uuid,
+        subscription_name,
+        query_opts(data)
       )
 
     case reply do
@@ -344,8 +342,6 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp create_subscription(%SubscriptionState{} = data) do
     %SubscriptionState{
       conn: conn,
-      query_timeout: query_timeout,
-      schema: schema,
       start_from: start_from,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name
@@ -356,8 +352,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       stream_uuid,
       subscription_name,
       start_from,
-      schema: schema,
-      timeout: query_timeout
+      query_opts(data)
     )
   end
 
@@ -494,22 +489,24 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp read_stream_forward(%SubscriptionState{} = data) do
     %SubscriptionState{
       conn: conn,
-      schema: schema,
       serializer: serializer,
       stream_uuid: stream_uuid,
       last_sent: last_sent,
       max_size: max_size,
-      query_timeout: query_timeout,
       correlation_id_type: correlation_id_type,
       causation_id_type: causation_id_type
     } = data
 
-    Stream.read_stream_forward(conn, stream_uuid, last_sent + 1, max_size,
-      schema: schema,
-      serializer: serializer,
-      timeout: query_timeout,
-      correlation_id_type: correlation_id_type,
-      causation_id_type: causation_id_type
+    Stream.read_stream_forward(
+      conn,
+      stream_uuid,
+      last_sent + 1,
+      max_size,
+      query_opts(data,
+        serializer: serializer,
+        correlation_id_type: correlation_id_type,
+        causation_id_type: causation_id_type
+      )
     )
   end
 
@@ -766,13 +763,11 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp persist_checkpoint(%SubscriptionState{transient: false} = data) do
     %SubscriptionState{
       conn: conn,
-      schema: schema,
       stream_uuid: stream_uuid,
       subscription_name: subscription_name,
       fencing_token: fencing_token,
       lock_ref: lock_ref,
       last_ack: last_ack,
-      query_timeout: query_timeout,
       checkpoints_pending: checkpoints_pending,
       telemetry_metadata: telemetry_metadata
     } = data
@@ -787,9 +782,11 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
       result =
         Telemetry.span(:subscription_checkpoint, metadata, fn ->
-          Storage.Subscription.ack_last_seen_event(conn, fencing_token, last_ack,
-            schema: schema,
-            timeout: query_timeout
+          Storage.Subscription.ack_last_seen_event(
+            conn,
+            fencing_token,
+            last_ack,
+            query_opts(data)
           )
         end)
 
@@ -828,6 +825,13 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
   defp over_capacity?(%SubscriptionState{queue_size: queue_size, max_size: max_size}),
     do: queue_size >= max_size
+
+  defp query_opts(%SubscriptionState{} = data, opts \\ []) do
+    %SubscriptionState{checkout_opts: checkout_opts, query_timeout: query_timeout, schema: schema} =
+      data
+
+    Keyword.merge(checkout_opts, [schema: schema, timeout: query_timeout] ++ opts)
+  end
 
   defp describe(%SubscriptionState{stream_uuid: stream_uuid, subscription_name: name}),
     do: "Subscription #{inspect(name)}@#{inspect(stream_uuid)}"

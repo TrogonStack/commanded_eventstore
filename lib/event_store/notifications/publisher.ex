@@ -21,6 +21,7 @@ defmodule EventStore.Notifications.Publisher do
       :schema,
       :serializer,
       :subscribe_to,
+      checkout_opts: [],
       correlation_id_type: "uuid",
       causation_id_type: "uuid"
     ]
@@ -33,6 +34,7 @@ defmodule EventStore.Notifications.Publisher do
         schema: Keyword.fetch!(opts, :schema),
         serializer: Keyword.fetch!(opts, :serializer),
         subscribe_to: Keyword.fetch!(opts, :subscribe_to),
+        checkout_opts: Keyword.get(opts, :checkout_opts, []),
         correlation_id_type: Keyword.get(opts, :correlation_id_type, "uuid"),
         causation_id_type: Keyword.get(opts, :causation_id_type, "uuid")
       }
@@ -79,6 +81,7 @@ defmodule EventStore.Notifications.Publisher do
     %State{
       conn: conn,
       query_timeout: query_timeout,
+      checkout_opts: checkout_opts,
       schema: schema,
       serializer: serializer,
       correlation_id_type: correlation_id_type,
@@ -88,12 +91,15 @@ defmodule EventStore.Notifications.Publisher do
     count = to_stream_version - from_stream_version + 1
 
     try do
-      case Storage.read_stream_forward(conn, stream_id, from_stream_version, count,
-             schema: schema,
-             timeout: query_timeout,
-             correlation_id_type: correlation_id_type,
-             causation_id_type: causation_id_type
-           ) do
+      opts =
+        Keyword.merge(checkout_opts,
+          schema: schema,
+          timeout: query_timeout,
+          correlation_id_type: correlation_id_type,
+          causation_id_type: causation_id_type
+        )
+
+      case Storage.read_stream_forward(conn, stream_id, from_stream_version, count, opts) do
         {:ok, events} ->
           deserialized_events = deserialize_recorded_events(events, serializer)
 

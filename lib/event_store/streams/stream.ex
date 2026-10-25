@@ -401,7 +401,7 @@ defmodule EventStore.Streams.Stream do
     end
   end
 
-  defp query_opts(opts), do: Keyword.take(opts, [:schema, :timeout])
+  defp query_opts(opts), do: Keyword.take(opts, [:schema, :timeout, :checkout_retries])
 
   # Returns the current date time in UTC.
   defp utc_now, do: DateTime.utc_now()
