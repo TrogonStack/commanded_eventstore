@@ -27,6 +27,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         buffer_size: opts[:buffer_size] || 1,
         checkpoint_after: opts[:checkpoint_after] || 0,
         checkpoint_threshold: opts[:checkpoint_threshold] || 1,
+        retry_interval: Keyword.fetch!(opts, :retry_interval),
         query_timeout: opts[:query_timeout] || 15_000,
         checkout_opts: Keyword.get(opts, :checkout_opts, []),
         telemetry_metadata: Keyword.get(opts, :telemetry_metadata, %{}),
@@ -736,8 +737,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %SubscriptionState{
       checkpoint_after: checkpoint_after,
       checkpoints_pending: checkpoints_pending,
-      checkpoint_threshold: checkpoint_threshold,
-      checkpoint_timer_ref: checkpoint_timer_ref
+      checkpoint_threshold: checkpoint_threshold
     } = data
 
     cond do
@@ -745,15 +745,21 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         persist_checkpoint(data)
 
       checkpoint_after > 0 ->
-        if checkpoint_timer_ref, do: Process.cancel_timer(checkpoint_timer_ref)
-
-        checkpoint_timer_ref = Process.send_after(self(), :checkpoint, checkpoint_after)
-
-        %SubscriptionState{data | checkpoint_timer_ref: checkpoint_timer_ref}
+        schedule_checkpoint(data, checkpoint_after)
 
       true ->
         data
     end
+  end
+
+  defp schedule_checkpoint(%SubscriptionState{} = data, delay) do
+    %SubscriptionState{checkpoint_timer_ref: checkpoint_timer_ref} = data
+
+    if checkpoint_timer_ref, do: Process.cancel_timer(checkpoint_timer_ref)
+
+    checkpoint_timer_ref = Process.send_after(self(), :checkpoint, delay)
+
+    %SubscriptionState{data | checkpoint_timer_ref: checkpoint_timer_ref}
   end
 
   defp persist_checkpoint(%SubscriptionState{transient: true} = data) do
@@ -761,6 +767,17 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   end
 
   defp persist_checkpoint(%SubscriptionState{transient: false} = data) do
+    %SubscriptionState{fencing_token: fencing_token, checkpoints_pending: checkpoints_pending} =
+      data
+
+    if checkpoints_pending > 0 and fencing_token != nil do
+      write_checkpoint(data)
+    else
+      %SubscriptionState{data | checkpoints_pending: 0}
+    end
+  end
+
+  defp write_checkpoint(%SubscriptionState{} = data) do
     %SubscriptionState{
       conn: conn,
       stream_uuid: stream_uuid,
@@ -768,45 +785,57 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       fencing_token: fencing_token,
       lock_ref: lock_ref,
       last_ack: last_ack,
-      checkpoints_pending: checkpoints_pending,
       telemetry_metadata: telemetry_metadata
     } = data
 
-    if checkpoints_pending > 0 and fencing_token != nil do
-      metadata =
-        Map.merge(telemetry_metadata, %{
-          stream_uuid: stream_uuid,
-          subscription_name: subscription_name,
-          last_seen: last_ack
-        })
+    metadata =
+      Map.merge(telemetry_metadata, %{
+        stream_uuid: stream_uuid,
+        subscription_name: subscription_name,
+        last_seen: last_ack
+      })
 
-      result =
-        Telemetry.span(:subscription_checkpoint, metadata, fn ->
-          Storage.Subscription.ack_last_seen_event(
-            conn,
-            fencing_token,
-            last_ack,
-            query_opts(data)
-          )
-        end)
+    result =
+      Telemetry.span(:subscription_checkpoint, metadata, fn ->
+        Storage.Subscription.ack_last_seen_event(
+          conn,
+          fencing_token,
+          last_ack,
+          query_opts(data)
+        )
+      end)
 
-      # Reaching no row means the subscription being checkpointed has been deleted. Subscribing
-      # again would recreate it at the position the delete removed, so the subscription stops
-      # instead and leaves its subscribers to subscribe from wherever the delete left them.
-      case result do
-        {:error, :subscription_not_found} ->
-          send(self(), {:checkpoint_failed, :subscription_not_found})
+    # Reaching no row means the subscription being checkpointed has been deleted. Subscribing
+    # again would recreate it at the position the delete removed, so the subscription stops
+    # instead and leaves its subscribers to subscribe from wherever the delete left them.
+    case result do
+      :ok ->
+        %SubscriptionState{data | checkpoints_pending: 0}
 
-        {:error, :fenced} ->
-          send(self(), {:fenced, lock_ref})
+      {:error, :subscription_not_found} ->
+        send(self(), {:checkpoint_failed, :subscription_not_found})
 
-        _ ->
-          :ok
-      end
+        %SubscriptionState{data | checkpoints_pending: 0}
+
+      {:error, :fenced} ->
+        send(self(), {:fenced, lock_ref})
+
+        %SubscriptionState{data | checkpoints_pending: 0}
+
+      # The position is still unwritten, so it is tried again even if no further ack arrives. A
+      # subscription that writes on every ack has no interval of its own, and waits as long as it
+      # would to retry subscribing against the same database.
+      {:error, _error} ->
+        schedule_checkpoint(data, checkpoint_retry_delay(data))
     end
-
-    %SubscriptionState{data | checkpoints_pending: 0}
   end
+
+  defp checkpoint_retry_delay(%SubscriptionState{checkpoint_after: checkpoint_after})
+       when checkpoint_after > 0,
+       do: checkpoint_after
+
+  defp checkpoint_retry_delay(%SubscriptionState{retry_interval: retry_interval}),
+    do: retry_interval
 
   # Purge all subscriber in-flight events and subscription event queue.
   defp purge_in_flight_events(%SubscriptionState{} = data) do

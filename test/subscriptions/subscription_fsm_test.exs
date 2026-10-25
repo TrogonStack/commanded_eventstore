@@ -463,6 +463,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
       checkpoint_after: Keyword.get(overrides, :checkpoint_after, 0),
+      retry_interval: Keyword.get(overrides, :retry_interval, 60_000),
       query_timeout: 15_000,
       event_store: TestEventStore,
       serializer: context.serializer,
