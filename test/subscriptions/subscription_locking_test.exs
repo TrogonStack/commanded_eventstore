@@ -3,7 +3,7 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
 
   import ExUnit.CaptureLog
 
-  alias EventStore.{Config, EventFactory, Storage, UUID, Wait}
+  alias EventStore.{Config, EventFactory, RecordedEvent, Storage, UUID, Wait}
   alias EventStore.Subscriptions.{FencingToken, Subscription}
 
   @conn TestEventStore.Postgrex
@@ -288,6 +288,28 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     end
   end
 
+  describe "subscription retrying while disconnected" do
+    @describetag retry_interval: 60_000
+
+    setup [:create_subscription]
+
+    test "keeps a single retry pending however many events it hears about", %{
+      subscription: subscription
+    } do
+      assert_receive {:subscribed, ^subscription}
+
+      trace_retries(subscription)
+
+      :ok = disconnect(subscription)
+
+      for event_number <- 1..10 do
+        send(subscription, {:events, [%RecordedEvent{event_number: event_number}]})
+      end
+
+      assert retries_scheduled(subscription) == 1
+    end
+  end
+
   describe "subscription stopped after another owner took over" do
     test "should leave the progress of the new owner untouched", %{
       conn: conn,
@@ -371,7 +393,7 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
         serializer: serializer,
         correlation_id_type: correlation_id_type,
         causation_id_type: causation_id_type,
-        retry_interval: 1_000,
+        retry_interval: Map.get(context, :retry_interval, 1_000),
         stream_uuid: "$all",
         subscription_name: subscription_name,
         buffer_size: 3,
@@ -422,6 +444,32 @@ defmodule EventStore.Subscriptions.SubscriptionLockingTest do
     %Subscription{subscription: %{state: state}} = :sys.get_state(subscription)
 
     state
+  end
+
+  defp trace_retries(subscription) do
+    :erlang.trace_pattern({:erlang, :send_after, :_}, true, [:global])
+    :erlang.trace(subscription, true, [:call])
+
+    on_exit(fn -> :erlang.trace_pattern({:erlang, :send_after, :_}, false, [:global]) end)
+  end
+
+  defp retries_scheduled(subscription) do
+    _state = :sys.get_state(subscription)
+
+    ref = :erlang.trace_delivered(subscription)
+    assert_receive {:trace_delivered, ^subscription, ^ref}
+
+    count_retries(subscription, 0)
+  end
+
+  defp count_retries(subscription, count) do
+    receive do
+      {:trace, ^subscription, :call,
+       {:erlang, :send_after, [_time, _dest, :subscribe_to_stream | _opts]}} ->
+        count_retries(subscription, count + 1)
+    after
+      0 -> count
+    end
   end
 
   defp wait_for_new_lock_ref(subscription, old_lock_ref) do
