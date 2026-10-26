@@ -5,6 +5,10 @@ defmodule EventStore.Storage.StreamPersistenceTest do
   alias EventStore.Storage.{Appender, CreateStream, Stream}
   alias EventStore.Streams.StreamInfo
 
+  # `created_at` is stamped by the database clock while the bounds come from the
+  # VM clock, and the two can drift apart, e.g. with Postgres in a container.
+  @clock_skew_tolerance_ms 1_000
+
   test "create stream", %{conn: conn, schema: schema} do
     stream_uuid = UUID.uuid4()
 
@@ -42,8 +46,7 @@ defmodule EventStore.Storage.StreamPersistenceTest do
              stream_info
            )
 
-    assert DateTime.compare(created_at, before) != :lt
-    assert DateTime.compare(created_at, after_create) != :gt
+    assert_within_clock_skew(created_at, before, after_create)
   end
 
   test "stream info for stream with one event", %{conn: conn, schema: schema} = context do
@@ -161,5 +164,13 @@ defmodule EventStore.Storage.StreamPersistenceTest do
       )
 
     {:ok, stream_id}
+  end
+
+  defp assert_within_clock_skew(%DateTime{} = timestamp, %DateTime{} = from, %DateTime{} = to) do
+    earliest = DateTime.add(from, -@clock_skew_tolerance_ms, :millisecond)
+    latest = DateTime.add(to, @clock_skew_tolerance_ms, :millisecond)
+
+    assert DateTime.compare(timestamp, earliest) != :lt
+    assert DateTime.compare(timestamp, latest) != :gt
   end
 end
