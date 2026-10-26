@@ -143,6 +143,31 @@ defmodule EventStore.AdvisoryLocksTest do
                AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
     end
 
+    test "should keep every lock on the node while a table lock outlasts a claim", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: held_id} = create_subscription(context)
+
+      {:ok, %AdvisoryLocks.Lease{ref: ref}} = AdvisoryLocks.try_subscription_lock(@locks, held_id)
+
+      other = create_subscription(context, "other_subscription")
+
+      table_lock = lock_subscriptions_table(context)
+
+      try do
+        assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} =
+                 AdvisoryLocks.try_subscription_lock(@locks, other.subscription_id, 1_000)
+      after
+        release_table_lock(table_lock)
+      end
+
+      _state = :sys.get_state(@locks)
+
+      refute_received {AdvisoryLocks, :lock_released, ^ref, _reason}
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, held_id, schema: schema)
+    end
+
     test "should fail to acquire the lock of a subscription that does not exist" do
       assert {:error, :subscription_not_found} =
                AdvisoryLocks.try_subscription_lock(@locks, 999_999)
@@ -939,6 +964,33 @@ defmodule EventStore.AdvisoryLocksTest do
     assert_receive :connection_held, 5_000
 
     holder
+  end
+
+  defp lock_subscriptions_table(%{conn: conn, schema: schema}) do
+    reply_to = self()
+
+    table_lock =
+      Task.async(fn ->
+        Postgrex.transaction(conn, fn holder_conn ->
+          Postgrex.query!(holder_conn, "LOCK TABLE \"#{schema}\".subscriptions", [])
+
+          send(reply_to, :table_locked)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :table_locked
+
+    table_lock
+  end
+
+  defp release_table_lock(%Task{pid: pid} = table_lock) do
+    send(pid, :release)
+
+    {:ok, :ok} = Task.await(table_lock)
   end
 
   defp wait_until_waiting_for_connection do
