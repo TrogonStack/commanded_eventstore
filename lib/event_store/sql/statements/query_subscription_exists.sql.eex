@@ -1,0 +1,1 @@
+SELECT EXISTS (SELECT 1 FROM "<%= schema %>".subscriptions WHERE subscription_id = $1);
