@@ -53,6 +53,7 @@ defmodule EventStore.Notifications.Supervisor do
         {Publisher,
          conn: conn,
          query_timeout: query_timeout,
+         checkout_opts: Config.checkout_opts(config),
          event_store: event_store,
          schema: schema,
          serializer: serializer,

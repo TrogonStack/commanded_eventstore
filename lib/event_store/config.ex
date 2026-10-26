@@ -151,6 +151,14 @@ defmodule EventStore.Config do
     :username
   ]
 
+  @doc """
+  Get the options every query has to be given because the connection pool ignores them when it
+  is started.
+
+  DBConnection only reads `:checkout_retries` from the options of each call.
+  """
+  def checkout_opts(config), do: Keyword.take(config, [:checkout_retries])
+
   # Only the main pool may recycle connections, every other connection holds
   # state tied to its lifetime (advisory locks, LISTEN registrations).
   def default_postgrex_opts(config) do

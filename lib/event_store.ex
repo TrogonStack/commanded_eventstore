@@ -521,13 +521,16 @@ defmodule EventStore do
             causation_id_type = Keyword.get(config, :causation_id_type, "uuid")
 
             query_timeout = timeout(opts, config)
+            checkout_opts = Config.checkout_opts(config)
 
             {start_from, opts} = Keyword.pop(opts, :start_from, :origin)
 
             with {:ok, start_from} <-
-                   Stream.start_from(conn, stream_uuid, start_from,
-                     schema: schema,
-                     timeout: query_timeout
+                   Stream.start_from(
+                     conn,
+                     stream_uuid,
+                     start_from,
+                     Keyword.merge(checkout_opts, schema: schema, timeout: query_timeout)
                    ) do
               opts =
                 opts
@@ -537,6 +540,7 @@ defmodule EventStore do
                   event_store: name,
                   telemetry_metadata: Telemetry.metadata(__MODULE__, opts),
                   query_timeout: query_timeout,
+                  checkout_opts: checkout_opts,
                   schema: schema,
                   serializer: serializer,
                   correlation_id_type: correlation_id_type,
