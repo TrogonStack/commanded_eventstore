@@ -455,6 +455,7 @@ defmodule EventStore.Subscriptions.StreamSubscriptionTestCase do
         |> Keyword.put(:correlation_id_type, correlation_id_type)
         |> Keyword.put(:causation_id_type, causation_id_type)
         |> Keyword.put_new(:buffer_size, 3)
+        |> Keyword.put_new(:retry_interval, 60_000)
 
       stream_uuid
       |> SubscriptionFsm.new(@subscription_name, opts)

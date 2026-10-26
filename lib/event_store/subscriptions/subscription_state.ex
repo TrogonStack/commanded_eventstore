@@ -20,6 +20,7 @@ defmodule EventStore.Subscriptions.SubscriptionState do
     :query_timeout,
     :lock_ref,
     :fencing_token,
+    :retry_interval,
     checkout_opts: [],
     telemetry_metadata: %{},
     correlation_id_type: "uuid",
