@@ -60,6 +60,8 @@ defmodule EventStore.Subscriptions.Subscriber do
   subscriber before the ack'd event.
   """
   def acknowledge(%Subscriber{superseded: superseded} = subscriber, ack) do
+    # Earlier deliveries reach the subscriber before the ones sent after a reset, so acknowledging
+    # one of the later deliveries means none of the earlier ones will be acknowledged anymore.
     case oldest_ack_event_index(superseded, ack) do
       nil -> acknowledge_in_flight(%Subscriber{subscriber | superseded: []}, ack)
       index -> {:ok, %Subscriber{subscriber | superseded: Enum.take(superseded, index)}, []}
