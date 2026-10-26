@@ -1,0 +1,4 @@
+UPDATE "<%= schema %>".subscriptions
+SET lock_generation = lock_generation + 1
+WHERE subscription_id = $1
+RETURNING lock_generation, last_seen;

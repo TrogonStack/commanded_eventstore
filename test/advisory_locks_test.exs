@@ -11,9 +11,7 @@ defmodule EventStore.AdvisoryLocksTest do
   @monitor TestEventStore.EventStore.AdvisoryLocks.Postgrex.EventStore.MonitoredServer
 
   setup do
-    postgrex_config = Config.parsed(TestEventStore, :eventstore) |> Config.default_postgrex_opts()
-
-    conn = start_supervised!({Postgrex, postgrex_config})
+    conn = start_supervised!({Postgrex, postgrex_config()})
 
     [conn: conn]
   end
@@ -166,6 +164,65 @@ defmodule EventStore.AdvisoryLocksTest do
 
       assert {:error, :lock_already_taken} =
                Storage.Lock.try_acquire_exclusive_lock(conn, held_id, schema: schema)
+    end
+
+    test "should keep the lock held when a repeated claim cannot wait for a table lock",
+         context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %AdvisoryLocks.Lease{}} = AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      table_lock = lock_subscriptions_table(context)
+
+      try do
+        assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} =
+                 AdvisoryLocks.try_subscription_lock(@locks, subscription_id, 1_000)
+      after
+        release_table_lock(table_lock)
+      end
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
+    end
+
+    test "should keep the lock held when a repeated claim is cancelled while it waits", context do
+      %{conn: conn, schema: schema} = context
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {:ok, %AdvisoryLocks.Lease{}} = AdvisoryLocks.try_subscription_lock(@locks, subscription_id)
+
+      lock_backend_pid = backend_pid(@conn)
+
+      canceller = start_supervised!({Postgrex, postgrex_config()}, id: :canceller)
+
+      table_lock = lock_subscriptions_table(context)
+
+      try do
+        cancel =
+          Task.async(fn ->
+            Wait.until(fn ->
+              assert %Postgrex.Result{rows: [["Lock"]]} =
+                       Postgrex.query!(
+                         canceller,
+                         "SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1",
+                         [lock_backend_pid]
+                       )
+            end)
+
+            Postgrex.query!(canceller, "SELECT pg_cancel_backend($1)", [lock_backend_pid])
+          end)
+
+        assert {:error, %Postgrex.Error{postgres: %{code: :query_canceled}}} =
+                 AdvisoryLocks.try_subscription_lock(@locks, subscription_id, 10_000)
+
+        assert %Postgrex.Result{rows: [[true]]} = Task.await(cancel)
+      after
+        release_table_lock(table_lock)
+      end
+
+      assert {:error, :lock_already_taken} =
+               Storage.Lock.try_acquire_exclusive_lock(conn, subscription_id, schema: schema)
     end
 
     test "should fail to acquire the lock of a subscription that does not exist" do
@@ -964,6 +1021,10 @@ defmodule EventStore.AdvisoryLocksTest do
     assert_receive :connection_held, 5_000
 
     holder
+  end
+
+  defp postgrex_config do
+    Config.parsed(TestEventStore, :eventstore) |> Config.default_postgrex_opts()
   end
 
   defp lock_subscriptions_table(%{conn: conn, schema: schema}) do
