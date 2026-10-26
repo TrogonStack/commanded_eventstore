@@ -92,6 +92,7 @@ defmodule EventStore.Supervisor do
             ),
             {AdvisoryLocks,
              conn: advisory_locks_postgrex_conn,
+             event_store: name,
              monitor: advisory_locks_postgrex_monitor,
              query_timeout: query_timeout,
              schema: schema,

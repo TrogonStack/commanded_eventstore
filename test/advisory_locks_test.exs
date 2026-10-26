@@ -732,6 +732,7 @@ defmodule EventStore.AdvisoryLocksTest do
         start_supervised!(
           {AdvisoryLocks,
            conn: conn_name,
+           event_store: TestEventStore,
            monitor: monitor_name,
            query_timeout: Keyword.fetch!(config, :timeout),
            schema: "public",
@@ -770,6 +771,7 @@ defmodule EventStore.AdvisoryLocksTest do
       start_supervised!(
         {AdvisoryLocks,
          conn: conn_name,
+         event_store: TestEventStore,
          monitor: monitor_name,
          query_timeout: Keyword.fetch!(config, :timeout),
          schema: "public",
@@ -823,6 +825,7 @@ defmodule EventStore.AdvisoryLocksTest do
                start_supervised(
                  {AdvisoryLocks,
                   conn: conn_name,
+                  event_store: TestEventStore,
                   monitor: monitor_name,
                   query_timeout: Keyword.fetch!(config, :timeout),
                   schema: "public",
@@ -860,6 +863,7 @@ defmodule EventStore.AdvisoryLocksTest do
       start_supervised!(
         {AdvisoryLocks,
          conn: conn_name,
+         event_store: TestEventStore,
          monitor: monitor_name,
          query_timeout: 100,
          schema: schema,

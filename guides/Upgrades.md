@@ -1,6 +1,18 @@
 # Upgrading an EventStore
 
-The [CHANGELOG](https://github.com/commanded/eventstore/blob/master/CHANGELOG.md) is used to indicate when a schema migration is required for a given version of the EventStore.
+Versions that need a schema migration are listed below. The [CHANGELOG](https://github.com/TrogonStack/commanded_eventstore/blob/main/CHANGELOG.md) of this fork and the [upstream CHANGELOG](https://github.com/commanded/eventstore/blob/master/CHANGELOG.md) for versions before the fork describe what changed in each release.
+
+## Upgrading to 1.5.0
+
+1.5.0 adds a `lock_generation` column to the `subscriptions` table, which fences the progress writes of a node that lost a subscription's lock. Run `mix event_store.migrate` (or `EventStore.Tasks.Migrate.exec/2` from a release) before starting any node on 1.5.0. EventStore does not migrate on start: a 1.5.0 node on an unmigrated database starts, but none of its persistent subscriptions ever subscribe, and it logs an error naming the migration until the schema is migrated.
+
+Subscription locks are now taken with an `UPDATE` on the `subscriptions` table over the session mode connection. When `session_mode_pool` (or `session_mode_url`) connects as a different role from the main pool, grant that role `SELECT` and `UPDATE` on `subscriptions` in the event store's schema:
+
+```sql
+GRANT SELECT, UPDATE ON "public".subscriptions TO session_mode_role;
+```
+
+Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges.
 
 ## Migrate before rolling nodes
 
