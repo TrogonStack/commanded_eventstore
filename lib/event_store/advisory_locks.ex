@@ -239,6 +239,7 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   def handle_cast({:release, ref}, %State{} = state) do
+    state = handle_pending_session_loss(state)
     %State{locks: locks} = state
 
     state =
@@ -260,6 +261,8 @@ defmodule EventStore.AdvisoryLocks do
         _from,
         %State{} = state
       ) do
+    state = handle_pending_session_loss(state)
+
     case {held_lock(state, subscription_id, owner),
           claim_subscription_lock(subscription_id, timeout, state)} do
       {nil, {:ok, %Storage.Lock.Lease{session: session} = lease}} ->
@@ -288,6 +291,8 @@ defmodule EventStore.AdvisoryLocks do
   end
 
   def handle_call({:try_advisory_lock, key, owner, timeout}, _from, %State{} = state) do
+    state = handle_pending_session_loss(state)
+
     case held_lock(state, key, owner) do
       {_owner_ref, %Lock{} = lock} ->
         {:reply, {:ok, Lock.ref(lock)}, state}
@@ -399,6 +404,7 @@ defmodule EventStore.AdvisoryLocks do
 
   # Release lock when the lock owner process terminates.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %State{} = state) do
+    state = handle_pending_session_loss(state)
     %State{locks: locks} = state
 
     state =
@@ -420,6 +426,19 @@ defmodule EventStore.AdvisoryLocks do
   def handle_info({:EXIT, _from, reason}, state) do
     {:stop, reason, state}
   end
+
+  # A query held up by a connection that stopped answering leaves the notice of
+  # its lost session queued behind the requests that arrived meanwhile, so it is
+  # handled before them instead of after each one has waited on the pool.
+  defp handle_pending_session_loss(%State{connection: %Connection{pid: conn_pid}} = state) do
+    receive do
+      {__MODULE__, :session_lost, ^conn_pid} -> disconnected(conn_pid, :session_ended, state)
+    after
+      0 -> state
+    end
+  end
+
+  defp handle_pending_session_loss(%State{} = state), do: state
 
   defp connected(conn_pid, %State{connection: connection} = state) do
     Connection.demonitor(connection)

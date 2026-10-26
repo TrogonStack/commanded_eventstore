@@ -16,6 +16,15 @@ Subscribers must therefore be idempotent, as they are for any at-least-once deli
 
 When the lock connection stalls, each attempt a subscription makes to take its lock waits for up to the event store's `timeout` (15 seconds by default), and the subscription makes another attempt every `:subscription_retry_interval` for as long as the connection stays stalled. A subscriber that calls `ack/2` on that subscription during an attempt can exit with a `:timeout` after the default 5 second call timeout, and that exposure comes back on every retry, so acks can keep timing out for far longer than a single `timeout`. The subscription's position is unaffected: a subscription waiting for its lock ignores those acks anyway, and it resumes from the last committed checkpoint once it holds the lock again. Subscribers that ack from a process that must not crash should catch that exit.
 
+### How long a node takes to learn its lock session ended
+
+Subscriptions hold their locks on a dedicated connection. When the database stops answering on that connection, how soon the node stops its subscriptions depends on what that connection was doing:
+
+- While a lock query is running, the node learns of the loss once the query reaches its `:timeout` (15,000ms by default), plus up to two seconds spent trying to cancel it. With `timeout: :infinity` the query never gives up and `ping_timeout` does not apply to it, so the node is not told until the socket itself errors, and until then its subscriptions keep running on a session that has ended. Keep `:timeout` finite on any node that runs subscriptions.
+- While the connection is idle, the node learns of the loss when the connection next pings the database: within one to two times `idle_interval` (1,000ms by default), plus however long the ping waits for a reply. That wait is `ping_timeout`, which defaults to `:timeout`. With `timeout: :infinity` the ping waits forever, so set `ping_timeout` in `session_mode_pool` to bound it, for example `session_mode_pool: [ping_timeout: 15_000]`.
+
+PostgreSQL only releases the locks of a session once it notices the client is gone, which can take longer still unless `tcp_keepalives_idle` or `client_connection_check_interval` is configured on the server. Until then no other node can take the lock, so a slow release delays the hand-off but never lets two nodes record progress at the same time.
+
 ## Automatic cluster formation
 
 You can use [libcluster](https://github.com/bitwalker/libcluster) to automatically form clusters of Erlang nodes, with either static or dynamic node membership.
