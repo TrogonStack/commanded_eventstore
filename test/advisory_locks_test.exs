@@ -822,7 +822,7 @@ defmodule EventStore.AdvisoryLocksTest do
   end
 
   describe "lock connection that connected before the lock server started" do
-    test "should send `lock_released` message when the lock connection crashes" do
+    setup do
       locks_name = Module.concat([__MODULE__, ConnectedFirst, AdvisoryLocks])
       conn_name = Module.concat([locks_name, Postgrex])
       monitor_name = Module.concat([conn_name, MonitoredServer])
@@ -843,16 +843,22 @@ defmodule EventStore.AdvisoryLocksTest do
 
       # The notice for this connection is sent to a lock server that does not exist yet.
       first_session = backend_pid(conn_name)
+      first_connection = lock_connection_pid(conn_name)
 
-      start_supervised!(
-        {AdvisoryLocks,
-         conn: conn_name,
-         event_store: TestEventStore,
-         monitor: monitor_name,
-         query_timeout: Keyword.fetch!(config, :timeout),
-         schema: "public",
-         name: locks_name}
-      )
+      [
+        locks_name: locks_name,
+        conn_name: conn_name,
+        monitor_name: monitor_name,
+        query_timeout: Keyword.fetch!(config, :timeout),
+        first_session: first_session,
+        first_connection: first_connection
+      ]
+    end
+
+    test "should send `lock_released` message when the lock connection crashes", context do
+      %{locks_name: locks_name, conn_name: conn_name, first_session: first_session} = context
+
+      start_lock_server(context)
 
       Wait.until(5_000, fn ->
         refute backend_pid(conn_name) == first_session,
@@ -866,6 +872,34 @@ defmodule EventStore.AdvisoryLocksTest do
 
         assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
       end)
+    end
+
+    test "should send `lock_released` message for a lock it held without waiting for its replacement",
+         %{locks_name: locks_name, first_connection: first_connection} = context do
+      start_lock_server(context)
+
+      without_restarts(first_connection, fn ->
+        # The lock server never heard from this connection, so only its disconnect
+        # notice can tell the owner the lock is gone.
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 500
+      end)
+    end
+
+    test "should send `lock_released` message for a lock it held when it is killed",
+         %{locks_name: locks_name, first_connection: first_connection} = context do
+      start_lock_server(context)
+
+      # Suspended, the connection cannot leave before it is killed, so it never sends
+      # a disconnect notice and only its replacement can reveal the lock is gone.
+      :ok = :sys.suspend(first_connection)
+
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+
+      Process.exit(first_connection, :kill)
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 5_000
     end
   end
 
@@ -1199,16 +1233,39 @@ defmodule EventStore.AdvisoryLocksTest do
     end)
   end
 
+  defp start_lock_server(context) do
+    %{
+      locks_name: locks_name,
+      conn_name: conn_name,
+      monitor_name: monitor_name,
+      query_timeout: query_timeout
+    } = context
+
+    start_supervised!(
+      {AdvisoryLocks,
+       conn: conn_name,
+       event_store: TestEventStore,
+       monitor: monitor_name,
+       query_timeout: query_timeout,
+       schema: "public",
+       name: locks_name}
+    )
+  end
+
   defp without_reconnects(conn \\ @conn, fun) do
     lock_connection = lock_connection_pid(conn)
 
+    without_restarts(lock_connection, fn -> fun.(lock_connection) end)
+  end
+
+  defp without_restarts(lock_connection, fun) do
     {:dictionary, dictionary} = Process.info(lock_connection, :dictionary)
     [connection_supervisor | _ancestors] = dictionary[:"$ancestors"]
 
     :ok = :sys.suspend(connection_supervisor)
 
     try do
-      fun.(lock_connection)
+      fun.()
     after
       :ok = :sys.resume(connection_supervisor)
     end
