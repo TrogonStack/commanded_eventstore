@@ -14,6 +14,7 @@ default_config = [
   password: "postgres",
   database: "eventstore_text_ids_test",
   hostname: "localhost",
+  port: String.to_integer(System.get_env("PGPORT", "5432")),
   pool_size: 1,
   serializer: EventStore.JsonSerializer,
   subscription_retry_interval: 1_000

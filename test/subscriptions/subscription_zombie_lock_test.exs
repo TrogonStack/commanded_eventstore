@@ -10,7 +10,7 @@ defmodule EventStore.Subscriptions.SubscriptionZombieLockTest do
   setup %{config: config, schema: schema} do
     proxy =
       start_supervised!(
-        {TcpProxy, {Keyword.fetch!(config, :hostname), Keyword.get(config, :port, 5432)}}
+        {TcpProxy, {Keyword.fetch!(config, :hostname), Keyword.fetch!(config, :port)}}
       )
 
     start_supervised!(
