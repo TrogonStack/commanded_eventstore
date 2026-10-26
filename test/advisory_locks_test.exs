@@ -622,6 +622,20 @@ defmodule EventStore.AdvisoryLocksTest do
                Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
     end
 
+    test "should send `lock_released` message when a reconnect lands on a new session with the same backend pid" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      # A restarted or failed over server can hand the same backend pid to the new
+      # session, which then reads a new session id.
+      Postgrex.query!(@conn, "SELECT set_config('eventstore.session_id', '', false)", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, :session_ended}, 1_000
+    end
+
     test "should send `lock_released` message when the lock connection crashes" do
       {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
 
