@@ -227,6 +227,26 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     ProcessHelper.shutdown(owner)
   end
 
+  test "a claim that loses does not spend a transaction id", context do
+    %{postgrex_config: postgrex_config, conn: conn, schema: schema} = context
+    %{subscription_id: subscription_id} = create_subscription(context)
+
+    {:ok, owner} = Postgrex.start_link(postgrex_config)
+
+    assert {:ok, _lease} = Lock.claim_subscription_lock(owner, subscription_id, schema: schema)
+
+    before_claims = txid_current(conn)
+
+    for _ <- 1..5 do
+      assert {:error, :lock_already_taken} =
+               Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+    end
+
+    assert txid_current(conn) == before_claims + 1
+
+    ProcessHelper.shutdown(owner)
+  end
+
   describe "ack with a fencing token" do
     test "a stale generation is fenced and leaves the position alone", context do
       %{conn: conn, schema: schema} = context
@@ -298,5 +318,11 @@ defmodule EventStore.Storage.SubscriptionLockTest do
       )
 
     last_seen
+  end
+
+  defp txid_current(conn) do
+    %Postgrex.Result{rows: [[txid]]} = Postgrex.query!(conn, "SELECT txid_current()", [])
+
+    txid
   end
 end
