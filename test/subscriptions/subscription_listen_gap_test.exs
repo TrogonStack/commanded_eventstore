@@ -4,6 +4,7 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
   alias EventStore.{EventFactory, ListenerHelpers, TcpProxy, UUID, Wait}
 
   @store :listen_gap_store
+  @notifications_conn Module.concat([@store, Postgrex, Notifications])
 
   setup %{config: config, conn: conn, schema: schema} do
     proxy =
@@ -17,6 +18,7 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
       {TestEventStore,
        name: @store,
        schema: schema,
+       configure: {__MODULE__, :configure, [self()]},
        session_mode_pool: [
          port: TcpProxy.port(proxy),
          idle_interval: 100,
@@ -50,6 +52,18 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
     :ok = TcpProxy.forward(proxy)
 
     assert_receive {:events, [%{event_number: 2}]}, 5_000
+  end
+
+  test "the notification connection runs the configured :configure before connecting" do
+    notifications = Process.whereis(@notifications_conn)
+
+    assert_receive {:configure, ^notifications}
+  end
+
+  def configure(opts, test) do
+    send(test, {:configure, self()})
+
+    opts
   end
 
   defp append(count) do
