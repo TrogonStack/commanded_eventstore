@@ -131,6 +131,25 @@ defmodule EventStore.MigrateEventStoreTest do
 
       assert has_lock_generation?(config, "public")
     end
+
+    test "should keep upstream's 1.5.0 when migrated again", %{config: config} do
+      create_new_database(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+
+        Postgrex.query!(
+          conn,
+          "INSERT INTO schema_migrations (major_version, minor_version, patch_version) VALUES (1, 5, 0)",
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert "1.5.0" == latest_version(config, "public")
+    end
   end
 
   defp has_lock_generation?(config, schema) do
