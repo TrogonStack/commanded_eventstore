@@ -196,7 +196,20 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     end
   end
 
-  def ack(%__MODULE__{data: %SubscriptionState{}} = fsm, _ack, _subscriber), do: fsm
+  def ack(%__MODULE__{data: %SubscriptionState{} = data} = fsm, ack, subscriber_pid) do
+    %SubscriptionState{subscribers: subscribers} = data
+
+    case subscriber_by_pid(subscribers, subscriber_pid) do
+      {:ok, subscriber} ->
+        subscriber = Subscriber.discard_superseded(subscriber, ack)
+        subscribers = Map.put(subscribers, subscriber_pid, subscriber)
+
+        %__MODULE__{fsm | data: %SubscriptionState{data | subscribers: subscribers}}
+
+      {:error, :unknown_subscriber} ->
+        fsm
+    end
+  end
 
   def checkpoint(%__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm) do
     %__MODULE__{fsm | state: :request_catch_up, data: persist_checkpoint(data)}
