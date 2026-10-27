@@ -32,6 +32,7 @@ defmodule EventStore.Tasks.Migrate do
       {:ok, conn} = Postgrex.start_link(config)
 
       try do
+        forget_fork_schema_version(conn, schema)
         migrations = available_migrations(conn, schema)
 
         migrate(conn, schema, opts, migrations)
@@ -67,6 +68,21 @@ defmodule EventStore.Tasks.Migrate do
 
   defp acquire_migration_lock(conn, schema) do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
+  end
+
+  # Earlier fork releases recorded the lock generation as schema version 1.5.0,
+  # which would hide upstream migrations up to 1.5.0 from upstream's migrate.
+  defp forget_fork_schema_version(conn, schema) do
+    if lock_generation?(conn, schema) do
+      Postgrex.query!(
+        conn,
+        """
+        DELETE FROM "#{schema}".schema_migrations
+        WHERE (major_version, minor_version, patch_version) = (1, 5, 0)
+        """,
+        []
+      )
+    end
   end
 
   defp available_migrations(conn, schema) do
