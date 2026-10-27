@@ -11,6 +11,13 @@ BEGIN
   ) THEN
     DELETE FROM schema_migrations
     WHERE (major_version, minor_version, patch_version) = (1, 5, 0);
+
+    -- Event stores those builds created recorded 1.5.0 alone, and an empty
+    -- history makes upstream's migrate run every migration again.
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations) THEN
+      INSERT INTO schema_migrations (major_version, minor_version, patch_version)
+      VALUES (1, 3, 2);
+    END IF;
   ELSE
     ALTER TABLE subscriptions ADD COLUMN lock_generation bigint NOT NULL DEFAULT 0;
   END IF;
