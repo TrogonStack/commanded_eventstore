@@ -80,7 +80,27 @@ defmodule EventStore.Tasks.Migrations do
     completed = query_schema_migrations(config, schema)
     latest_migration = completed |> Enum.reverse() |> Enum.at(0, nil)
 
-    completed ++ pending_migrations(latest_migration)
+    pending = pending_migrations(latest_migration)
+
+    # Upstream can record its own 1.5.0, which would otherwise hide the fork's
+    # lock generation migration behind a version that is already recorded.
+    if Enum.any?(pending, &(&1.version == "1.5.0")) or lock_generation?(config, schema),
+      do: completed ++ pending,
+      else: completed ++ pending ++ [%Migration{version: "1.5.0"}]
+  end
+
+  defp lock_generation?(config, schema) do
+    %Postgrex.Result{rows: [[exists]]} =
+      run_query(config, """
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = '#{schema}'
+          AND table_name = 'subscriptions'
+          AND column_name = 'lock_generation'
+        )
+      """)
+
+    exists
   end
 
   defp pending_migrations(nil), do: @available_migrations
