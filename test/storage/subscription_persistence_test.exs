@@ -221,6 +221,19 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
     deleter = start_supervised!({Postgrex, postgrex_config}, id: :deleter)
     observer = start_supervised!({Postgrex, postgrex_config}, id: :observer)
 
+    unrelated_holder = start_supervised!({Postgrex, postgrex_config}, id: :unrelated_holder)
+    unrelated_waiter = start_supervised!({Postgrex, postgrex_config}, id: :unrelated_waiter)
+
+    Postgrex.query!(unrelated_holder, "SELECT pg_advisory_lock(424242)", [])
+
+    spawn(fn ->
+      Postgrex.query!(unrelated_waiter, "SELECT pg_advisory_lock(424242)", [], timeout: 60_000)
+    end)
+
+    holder_pid = backend_pid(unrelated_holder)
+
+    await_blocked_by(observer, holder_pid)
+
     test = self()
 
     delete =
@@ -229,7 +242,7 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
           :ok =
             Storage.delete_subscription(deleter, @all_stream, @subscription_name, schema: schema)
 
-          send(test, :deleted)
+          send(test, {:deleted, backend_pid(deleter)})
 
           receive do
             :commit -> :ok
@@ -237,24 +250,34 @@ defmodule EventStore.Storage.SubscriptionPersistenceTest do
         end)
       end)
 
-    assert_receive :deleted
+    assert_receive {:deleted, deleter_pid}
 
     ack = Task.async(fn -> Storage.ack_last_seen_event(conn, token, 1, schema: schema) end)
 
-    Wait.until(5_000, fn ->
-      assert %Postgrex.Result{rows: [[1]]} =
-               Postgrex.query!(
-                 observer,
-                 "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
-                 []
-               )
-    end)
+    await_blocked_by(observer, deleter_pid)
 
     send(delete.pid, :commit)
 
     assert {:ok, :ok} = Task.await(delete)
     assert {:error, :subscription_not_found} = Task.await(ack)
     assert {:error, :subscription_not_found} = read_subscription(context)
+  end
+
+  defp backend_pid(conn) do
+    %Postgrex.Result{rows: [[pid]]} = Postgrex.query!(conn, "SELECT pg_backend_pid()", [])
+
+    pid
+  end
+
+  defp await_blocked_by(observer, backend_pid) do
+    Wait.until(5_000, fn ->
+      assert %Postgrex.Result{rows: [[1]]} =
+               Postgrex.query!(
+                 observer,
+                 "SELECT count(*)::int FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+                 [backend_pid]
+               )
+    end)
   end
 
   defp read_subscription(context) do
