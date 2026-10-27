@@ -22,6 +22,10 @@ defmodule EventStore.Tasks.Migrations do
     "1.3.2"
   ]
 
+  @available_fork_migrations [
+    "subscription_lock_generation"
+  ]
+
   @dialyzer {:no_return, exec: 2, handle_response: 1}
 
   @doc """
@@ -57,6 +61,9 @@ defmodule EventStore.Tasks.Migrations do
 
   @doc false
   def available_migrations(), do: @available_migrations
+
+  @doc false
+  def available_fork_migrations(), do: @available_fork_migrations
 
   defp list_migration(%Migration{version: version, state: :pending}, opts) do
     write_info("  #{version |> String.pad_trailing(10)}\tpending", opts)

@@ -30,7 +30,9 @@ defmodule EventStore.Sql.Init do
       create_subscription_index(),
       create_snapshots_table(column_data_type),
       create_schema_migrations_table(),
-      record_event_store_schema_version()
+      record_event_store_schema_version(),
+      create_fork_schema_migrations_table(),
+      record_fork_schema_migrations()
     ]
   end
 
@@ -278,6 +280,25 @@ defmodule EventStore.Sql.Init do
     """
     INSERT INTO schema_migrations (major_version, minor_version, patch_version)
     VALUES (1, 3, 2);
+    """
+  end
+
+  # record execution of the fork's own upgrade scripts, apart from upstream's
+  # versions so that upstream's migrate still sees the versions it has not run
+  def create_fork_schema_migrations_table do
+    """
+    CREATE TABLE IF NOT EXISTS fork_schema_migrations
+    (
+        name text PRIMARY KEY NOT NULL,
+        migrated_at timestamp with time zone DEFAULT NOW() NOT NULL
+    );
+    """
+  end
+
+  defp record_fork_schema_migrations do
+    """
+    INSERT INTO fork_schema_migrations (name)
+    VALUES ('subscription_lock_generation');
     """
   end
 end

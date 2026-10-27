@@ -6,6 +6,7 @@ defmodule EventStore.Tasks.Migrate do
   import EventStore.Tasks.Output
 
   alias EventStore.{Config, Storage}
+  alias EventStore.Sql.Init
   alias EventStore.Tasks.Migrations
 
   @dialyzer {:no_return, exec: 2, handle_response: 1}
@@ -32,7 +33,6 @@ defmodule EventStore.Tasks.Migrate do
       {:ok, conn} = Postgrex.start_link(config)
 
       try do
-        forget_fork_schema_version(conn, schema)
         migrations = available_migrations(conn, schema)
 
         migrate(conn, schema, opts, migrations)
@@ -70,48 +70,27 @@ defmodule EventStore.Tasks.Migrate do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
   end
 
-  # Earlier fork releases recorded the lock generation as schema version 1.5.0,
-  # which would hide upstream migrations up to 1.5.0 from upstream's migrate.
-  defp forget_fork_schema_version(conn, schema) do
-    if lock_generation?(conn, schema) do
-      Postgrex.query!(
-        conn,
-        """
-        DELETE FROM "#{schema}".schema_migrations
-        WHERE (major_version, minor_version, patch_version) = (1, 5, 0)
-        """,
-        []
-      )
-    end
-  end
-
   defp available_migrations(conn, schema) do
-    migrations =
+    upstream =
       conn |> newer_migrations(schema) |> Enum.map(&{"v#{&1}", "migrations/v#{&1}.sql"})
 
-    if lock_generation?(conn, schema),
-      do: migrations,
-      else:
-        migrations ++
-          [{"subscription_lock_generation", "fork_migrations/subscription_lock_generation.sql"}]
+    fork =
+      conn
+      |> pending_fork_migrations(schema)
+      |> Enum.map(&{&1, "fork_migrations/#{&1}.sql"})
+
+    upstream ++ fork
   end
 
-  defp lock_generation?(conn, schema) do
-    %Postgrex.Result{rows: [[exists]]} =
-      Postgrex.query!(
-        conn,
-        """
-        SELECT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = $1
-          AND table_name = 'subscriptions'
-          AND column_name = 'lock_generation'
-        )
-        """,
-        [schema]
-      )
+  defp pending_fork_migrations(conn, schema) do
+    {:ok, %Postgrex.Result{rows: rows}} =
+      Postgrex.transaction(conn, fn transaction ->
+        Postgrex.query!(transaction, ~s(SET LOCAL search_path TO "#{schema}";), [])
+        Postgrex.query!(transaction, Init.create_fork_schema_migrations_table(), [])
+        Postgrex.query!(transaction, "SELECT name FROM fork_schema_migrations", [])
+      end)
 
-    exists
+    Migrations.available_fork_migrations() -- List.flatten(rows)
   end
 
   defp newer_migrations(conn, schema) do

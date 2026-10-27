@@ -101,6 +101,8 @@ defmodule EventStore.MigrateEventStoreTest do
       create_new_database(config)
 
       with_conn(config, fn conn ->
+        Postgrex.query!(conn, "DROP TABLE fork_schema_migrations", [])
+
         Postgrex.query!(
           conn,
           "INSERT INTO schema_migrations (major_version, minor_version, patch_version) VALUES (1, 5, 0)",
@@ -136,6 +138,7 @@ defmodule EventStore.MigrateEventStoreTest do
       create_new_database(config)
 
       with_conn(config, fn conn ->
+        Postgrex.query!(conn, "DROP TABLE fork_schema_migrations", [])
         Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
 
         Postgrex.query!(
