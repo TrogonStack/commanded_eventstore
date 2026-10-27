@@ -70,14 +70,14 @@ defmodule EventStore.Notifications.Listener do
   end
 
   # The connection answers a call only once it has connected and run every `LISTEN`, so a call
-  # that is answered with `:ok` shows the connection is listening.
+  # that is answered with `:ok` shows the connection is listening. Connecting can take longer
+  # than any query timeout, so the call waits for as long as the connection is alive.
   def handle_info(:connecting, %Listener{} = state) do
-    %Listener{listen_to: listen_to, query_timeout: query_timeout, schema: schema} = state
+    %Listener{listen_to: listen_to, schema: schema} = state
 
     listener = self()
 
-    {:ok, _pid} =
-      Task.start(fn -> await_listening(listener, listen_to, schema, query_timeout) end)
+    {:ok, _pid} = Task.start(fn -> await_listening(listener, listen_to, schema) end)
 
     {:noreply, [], state}
   end
@@ -118,8 +118,8 @@ defmodule EventStore.Notifications.Listener do
     dispatch_events([], state)
   end
 
-  defp await_listening(listener, listen_to, schema, query_timeout) do
-    case Postgrex.Notifications.listen(listen_to, schema <> ".events", timeout: query_timeout) do
+  defp await_listening(listener, listen_to, schema) do
+    case Postgrex.Notifications.listen(listen_to, schema <> ".events", timeout: :infinity) do
       {:ok, _ref} -> send(listener, :listening)
       {:eventually, _ref} -> :ok
     end
