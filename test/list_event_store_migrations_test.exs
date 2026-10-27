@@ -73,6 +73,21 @@ defmodule EventStore.ListEventStoreMigrationsTest do
     end
   end
 
+  describe "event store that recorded upstream's 1.5.0" do
+    test "lists the lock generation migration as pending", %{config: config} do
+      create_new_database(config)
+
+      {:ok, conn} = Postgrex.start_link(config)
+      Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+      :ok = GenServer.stop(conn)
+
+      states = capture_io(fn -> send(self(), EventStore.Tasks.Migrations.exec(config)) end)
+
+      assert_received states when is_list(states)
+      assert :pending in states
+    end
+  end
+
   defp create_new_database(config) do
     :ok = EventStore.Storage.Database.drop(config)
     :ok = EventStore.Storage.Database.create(config)
