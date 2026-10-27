@@ -96,6 +96,25 @@ defmodule EventStore.MigrateEventStoreTest do
     end
   end
 
+  describe "migrate an event store the fork recorded as 1.5.0" do
+    test "should leave no schema version above upstream's", %{config: config} do
+      create_new_database(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(
+          conn,
+          "INSERT INTO schema_migrations (major_version, minor_version, patch_version) VALUES (1, 5, 0)",
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert has_lock_generation?(config, "public")
+      assert "1.3.2" == latest_version(config, "public")
+    end
+  end
+
   describe "migrate an event store that recorded upstream's 1.5.0" do
     test "should still add the lock generation", %{config: config} do
       restore_pre_migration_event_store(config)
