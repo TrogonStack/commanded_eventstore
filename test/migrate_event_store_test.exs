@@ -88,6 +88,14 @@ defmodule EventStore.MigrateEventStoreTest do
     end
   end
 
+  describe "event store created by the fork" do
+    test "should record no schema version above upstream's", %{config: config} do
+      create_new_database(config)
+
+      assert "1.3.2" == latest_version(config, "public")
+    end
+  end
+
   describe "migrate an event store that recorded upstream's 1.5.0" do
     test "should still add the lock generation", %{config: config} do
       restore_pre_migration_event_store(config)
