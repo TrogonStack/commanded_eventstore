@@ -52,6 +52,13 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @doc """
+  Read any events not yet seen from storage.
+  """
+  def catch_up(subscription) do
+    GenServer.cast(subscription, :catch_up)
+  end
+
+  @doc """
   Confirm receipt of an event by its event number for a given subscriber.
   """
   def ack(subscription, ack, subscriber) when is_integer(ack) and is_pid(subscriber) do

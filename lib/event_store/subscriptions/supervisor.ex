@@ -30,6 +30,17 @@ defmodule EventStore.Subscriptions.Supervisor do
     DynamicSupervisor.start_child(supervisor, {Subscription, opts})
   end
 
+  @doc """
+  Ask every running subscription to read the events it has not seen from storage.
+  """
+  def catch_up(event_store) do
+    registry = Module.concat([event_store, Subscriptions.Registry])
+
+    registry
+    |> Registry.select([{{:_, :"$1", :_}, [], [:"$1"]}])
+    |> Enum.each(&Subscription.catch_up/1)
+  end
+
   def unsubscribe_from_stream(event_store, stream_uuid, subscription_name) do
     name = registry_name(event_store, stream_uuid, subscription_name)
 
