@@ -4,7 +4,7 @@ Versions that need a schema migration are listed below. The [CHANGELOG](https://
 
 ## Upgrading to 1.5.0
 
-1.5.0 adds a `lock_generation` column to the `subscriptions` table, which fences the progress writes of a node that lost a subscription's lock. Run `mix event_store.migrate` (or `EventStore.Tasks.Migrate.exec/2` from a release) before starting any node on 1.5.0. EventStore does not migrate on start: a 1.5.0 node on an unmigrated database starts, but none of its persistent subscriptions ever subscribe, and it logs an error naming the migration until the schema is migrated.
+1.5.0 adds a `lock_generation` column to the `subscriptions` table, which fences the progress writes of a node that lost a subscription's lock. Run `mix event_store.migrate` (or `EventStore.Tasks.Migrate.exec/2` from a release) before starting any node on 1.5.0. EventStore does not migrate on start: a 1.5.0 node on an unmigrated database starts, but none of its persistent subscriptions ever subscribe, and it logs an error naming the migration once, then keeps retrying without logging again until the schema is migrated.
 
 Subscription locks are now taken with an `UPDATE` on the `subscriptions` table over the session mode connection. When `session_mode_pool` (or `session_mode_url`) connects as a different role from the main pool, grant that role `SELECT` and `UPDATE` on `subscriptions` in the event store's schema:
 
@@ -12,7 +12,7 @@ Subscription locks are now taken with an `UPDATE` on the `subscriptions` table o
 GRANT SELECT, UPDATE ON "public".subscriptions TO session_mode_role;
 ```
 
-Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges.
+Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges once, then keeps retrying without logging again.
 
 This fork records its own migrations by name in a `fork_schema_migrations` table and leaves `schema_migrations` to upstream's versions, so a database moved back to upstream EventStore still runs every upstream migration it has not applied.
 
