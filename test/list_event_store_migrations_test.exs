@@ -90,6 +90,25 @@ defmodule EventStore.ListEventStoreMigrationsTest do
     end
   end
 
+  describe "event store in its own schema beside a migrated one" do
+    test "lists the migrations of its own schema", %{config: config} do
+      restore_pre_migration_event_store(config)
+
+      {:ok, conn} = Postgrex.start_link(config)
+      Postgrex.query!(conn, ~s(ALTER SCHEMA public RENAME TO "example"), [])
+      Postgrex.query!(conn, "CREATE SCHEMA public", [])
+      EventStore.Storage.Initializer.run!(conn, config)
+      :ok = GenServer.stop(conn)
+
+      output =
+        list_migrations(Keyword.put(config, :schema, "example"), eventstore: TestEventStore)
+
+      assert output =~ ~r/0\.17\.0\s+\tcompleted/
+      assert output =~ ~r/1\.3\.2\s+\tpending/
+      assert output =~ ~r/subscription_lock_generation\s*\tpending/
+    end
+  end
+
   defp create_new_database(config) do
     :ok = EventStore.Storage.Database.drop(config)
     :ok = EventStore.Storage.Database.create(config)
