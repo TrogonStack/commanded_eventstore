@@ -12,6 +12,7 @@ defmodule EventStore.AdvisoryLocks do
   alias EventStore.MonitoredServer
 
   @verify_retry 1_000
+  @session_lost_wait 1_000
 
   defmodule State do
     @moduledoc false
@@ -393,6 +394,9 @@ defmodule EventStore.AdvisoryLocks do
   def handle_info({__MODULE__, :session_lost, conn_pid}, %State{} = state) when is_pid(conn_pid),
     do: {:noreply, disconnected(conn_pid, :session_ended, state)}
 
+  def handle_info({__MODULE__, :query_disconnected}, %State{} = state),
+    do: {:noreply, receive_session_loss(state, @session_lost_wait)}
+
   def handle_info({:disconnected, conn_pid}, %State{} = state) when is_pid(conn_pid),
     do: {:noreply, disconnected(conn_pid, :session_ended, state)}
 
@@ -432,16 +436,26 @@ defmodule EventStore.AdvisoryLocks do
 
   # A query held up by a connection that stopped answering leaves the notice of
   # its lost session queued behind the requests that arrived meanwhile, so it is
-  # handled before them instead of after each one has waited on the pool.
-  defp handle_pending_session_loss(%State{connection: %Connection{pid: conn_pid}} = state) do
+  # handled before them instead of after each one has waited on the pool. A query
+  # that failed on that connection replies before the notice is sent, so it is
+  # awaited briefly then.
+  defp handle_pending_session_loss(%State{} = state) do
     receive do
-      {__MODULE__, :session_lost, ^conn_pid} -> disconnected(conn_pid, :session_ended, state)
+      {__MODULE__, :query_disconnected} -> receive_session_loss(state, @session_lost_wait)
     after
-      0 -> state
+      0 -> receive_session_loss(state, 0)
     end
   end
 
-  defp handle_pending_session_loss(%State{} = state), do: state
+  defp receive_session_loss(%State{connection: %Connection{pid: conn_pid}} = state, timeout) do
+    receive do
+      {__MODULE__, :session_lost, ^conn_pid} -> disconnected(conn_pid, :session_ended, state)
+    after
+      timeout -> state
+    end
+  end
+
+  defp receive_session_loss(%State{} = state, _timeout), do: state
 
   defp connected(conn_pid, %State{connection: connection} = state) do
     Connection.demonitor(connection)

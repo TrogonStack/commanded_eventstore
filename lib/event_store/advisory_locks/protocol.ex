@@ -47,7 +47,16 @@ defmodule EventStore.AdvisoryLocks.Protocol do
 
   # A retry runs on the next connection before the lock server has handled the
   # loss of this session, so the lock owners would hear of it only afterwards.
-  defp without_retry({:disconnect_and_retry, error, state}), do: {:disconnect, error, state}
+  defp without_retry({:disconnect_and_retry, error, state}),
+    do: without_retry({:disconnect, error, state})
+
+  # The query runs in the lock server, which replies before this connection gets
+  # to announce the loss of its session, so it is told to wait for that notice.
+  defp without_retry({:disconnect, _error, _state} = result) do
+    send(self(), {EventStore.AdvisoryLocks, :query_disconnected})
+    result
+  end
+
   defp without_retry(result), do: result
 
   @impl DBConnection
