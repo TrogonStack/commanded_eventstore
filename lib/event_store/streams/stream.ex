@@ -257,6 +257,7 @@ defmodule EventStore.Streams.Stream do
         case read_stream_batch(:forward, conn, stream, next_version, read_batch_size, opts) do
           {:ok, []} -> {:halt, next_version}
           {:ok, events} -> {events, List.last(events).event_number + 1}
+          {:error, reason} -> raise_read_error(:forward, stream, reason)
         end
       end,
       fn _next_version -> :ok end
@@ -283,10 +284,18 @@ defmodule EventStore.Streams.Stream do
           case read_stream_batch(:backward, conn, stream, next_version, read_batch_size, opts) do
             {:ok, []} -> {:halt, next_version}
             {:ok, events} -> {events, List.last(events).event_number - 1}
+            {:error, reason} -> raise_read_error(:backward, stream, reason)
           end
       end,
       fn _next_version -> :ok end
     )
+  end
+
+  defp raise_read_error(direction, %StreamInfo{stream_uuid: stream_uuid}, reason) do
+    raise EventStore.StreamReadError,
+      stream_uuid: stream_uuid,
+      direction: direction,
+      reason: reason
   end
 
   defp read_stream_batch(
