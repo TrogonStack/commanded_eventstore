@@ -1213,6 +1213,47 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "lock session ends while subscription lock claims are queued and new connections hang" do
+    @tag capture_log: true
+    test "should send `lock_released` message before a claim that failed to begin retries on the pool",
+         %{conn: conn, schema: schema} = context do
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {locks, proxy} =
+        start_proxied_lock_store(:failover_claim_store, schema, idle_interval: 60_000)
+
+      lock_pool = Module.concat([locks, Postgrex])
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        lock_connection = lock_connection_pid(lock_pool)
+        backend_pid = backend_pid(lock_pool)
+
+        :ok = EventStore.TcpProxy.blackhole(proxy)
+
+        %Postgrex.Result{rows: [[true]]} =
+          Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+        :ok = :sys.suspend(lock_connection)
+
+        for _claim <- 1..4,
+            do: spawn(fn -> AdvisoryLocks.try_subscription_lock(locks, subscription_id) end)
+
+        Wait.until(fn ->
+          {:messages, messages} = Process.info(lock_connection, :messages)
+          assert messages != []
+        end)
+
+        :ok = :sys.resume(lock_connection)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_000
+      after
+        stop_supervised!(EventStore.TcpProxy)
+      end
+    end
+  end
+
   # An event store whose lock connection goes through a proxy that can stop answering.
   defp start_proxied_lock_store(name, schema, session_mode_pool_opts) do
     config = Config.parsed(TestEventStore, :eventstore)
