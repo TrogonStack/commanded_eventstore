@@ -26,7 +26,7 @@ defmodule EventStore.ListEventStoreMigrationsTest do
         1.2.0     \tpending
         1.3.0     \tpending
         1.3.2     \tpending
-        1.5.0     \tpending
+        subscription_lock_generation\tpending
 
       """
 
@@ -63,6 +63,7 @@ defmodule EventStore.ListEventStoreMigrationsTest do
         output |> String.split("\n") |> Enum.drop(5) |> Enum.filter(&(String.trim(&1) != ""))
 
       assert Enum.all?(migrations, &String.contains?(&1, "completed"))
+      assert Enum.any?(migrations, &String.contains?(&1, "subscription_lock_generation"))
     end
 
     test "exits normally when running via mix", %{config: config} do
@@ -78,6 +79,7 @@ defmodule EventStore.ListEventStoreMigrationsTest do
       create_new_database(config)
 
       {:ok, conn} = Postgrex.start_link(config)
+      Postgrex.query!(conn, "DROP TABLE fork_schema_migrations", [])
       Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
       :ok = GenServer.stop(conn)
 

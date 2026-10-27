@@ -6,6 +6,7 @@ defmodule EventStore.Tasks.Migrate do
   import EventStore.Tasks.Output
 
   alias EventStore.{Config, Storage}
+  alias EventStore.Sql.Init
   alias EventStore.Tasks.Migrations
 
   @dialyzer {:no_return, exec: 2, handle_response: 1}
@@ -69,32 +70,27 @@ defmodule EventStore.Tasks.Migrate do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
   end
 
-  # Upstream can record its own 1.5.0, which would otherwise hide the fork's
-  # lock generation migration behind a version that is already recorded.
   defp available_migrations(conn, schema) do
-    migrations = newer_migrations(conn, schema)
+    upstream =
+      conn |> newer_migrations(schema) |> Enum.map(&{"v#{&1}", "migrations/v#{&1}.sql"})
 
-    if "1.5.0" in migrations or lock_generation?(conn, schema),
-      do: migrations,
-      else: migrations ++ ["1.5.0"]
+    fork =
+      conn
+      |> pending_fork_migrations(schema)
+      |> Enum.map(&{&1, "fork_migrations/#{&1}.sql"})
+
+    upstream ++ fork
   end
 
-  defp lock_generation?(conn, schema) do
-    %Postgrex.Result{rows: [[exists]]} =
-      Postgrex.query!(
-        conn,
-        """
-        SELECT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = $1
-          AND table_name = 'subscriptions'
-          AND column_name = 'lock_generation'
-        )
-        """,
-        [schema]
-      )
+  defp pending_fork_migrations(conn, schema) do
+    {:ok, %Postgrex.Result{rows: rows}} =
+      Postgrex.transaction(conn, fn transaction ->
+        Postgrex.query!(transaction, ~s(SET LOCAL search_path TO "#{schema}";), [])
+        Postgrex.query!(transaction, Init.create_fork_schema_migrations_table(), [])
+        Postgrex.query!(transaction, "SELECT name FROM fork_schema_migrations", [])
+      end)
 
-    exists
+    Migrations.available_fork_migrations() -- List.flatten(rows)
   end
 
   defp newer_migrations(conn, schema) do
@@ -116,10 +112,10 @@ defmodule EventStore.Tasks.Migrate do
   end
 
   defp migrate(conn, schema, opts, migrations) do
-    for migration <- migrations do
-      write_info("Running migration v#{migration}...", opts)
+    for {migration, file} <- migrations do
+      write_info("Running migration #{migration}...", opts)
 
-      path = Application.app_dir(:eventstore, "priv/event_store/migrations/v#{migration}.sql")
+      path = Application.app_dir(:eventstore, "priv/event_store/#{file}")
       script = File.read!(path)
 
       statements = [
