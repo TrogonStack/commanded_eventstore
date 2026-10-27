@@ -167,10 +167,29 @@ defmodule EventStore.AppendToStreamTest do
     stream_uuid = UUID.uuid4()
     events = EventFactory.create_events(8_001)
 
+    :ok = EventStore.subscribe(stream_uuid)
+    :ok = EventStore.subscribe("$all")
+
     assert :ok = EventStore.append_to_stream(stream_uuid, 0, events, timeout: :infinity)
+
+    # The notification publisher reads the appended events over the same
+    # single-connection pool, so wait for it to finish before streaming.
+    wait_until_published(8_001, 2)
 
     assert EventStore.stream_all_forward() |> Stream.map(& &1.event_number) |> Enum.to_list() ==
              Enum.to_list(1..8_001)
+  end
+
+  defp wait_until_published(_event_number, 0), do: :ok
+
+  defp wait_until_published(event_number, remaining) do
+    assert_receive {:events, [_ | _] = events}, 60_000
+
+    if List.last(events).event_number == event_number do
+      wait_until_published(event_number, remaining - 1)
+    else
+      wait_until_published(event_number, remaining)
+    end
   end
 
   defp append_events_to_stream(_context) do
