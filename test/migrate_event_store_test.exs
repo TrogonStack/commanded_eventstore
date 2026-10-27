@@ -88,6 +88,24 @@ defmodule EventStore.MigrateEventStoreTest do
     end
   end
 
+  describe "migrate an event store that recorded upstream's 1.5.0" do
+    test "should still add the lock generation", %{config: config} do
+      restore_pre_migration_event_store(config)
+
+      with_conn(config, fn conn ->
+        Postgrex.query!(
+          conn,
+          "INSERT INTO schema_migrations (major_version, minor_version, patch_version) VALUES (1, 5, 0)",
+          []
+        )
+      end)
+
+      migrate_eventstore(config, quiet: true, is_mix: false)
+
+      assert has_lock_generation?(config, "public")
+    end
+  end
+
   defp has_lock_generation?(config, schema) do
     with_conn(config, fn conn ->
       %Postgrex.Result{rows: [[exists]]} =

@@ -69,7 +69,35 @@ defmodule EventStore.Tasks.Migrate do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
   end
 
+  # Upstream can record its own 1.5.0, which would otherwise hide the fork's
+  # lock generation migration behind a version that is already recorded.
   defp available_migrations(conn, schema) do
+    migrations = newer_migrations(conn, schema)
+
+    if "1.5.0" in migrations or lock_generation?(conn, schema),
+      do: migrations,
+      else: migrations ++ ["1.5.0"]
+  end
+
+  defp lock_generation?(conn, schema) do
+    %Postgrex.Result{rows: [[exists]]} =
+      Postgrex.query!(
+        conn,
+        """
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = $1
+          AND table_name = 'subscriptions'
+          AND column_name = 'lock_generation'
+        )
+        """,
+        [schema]
+      )
+
+    exists
+  end
+
+  defp newer_migrations(conn, schema) do
     case event_store_schema_version(conn, schema) do
       %Version{} = event_store_version ->
         # Only run newer migrations
