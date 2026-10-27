@@ -69,14 +69,15 @@ defmodule EventStore.Tasks.Migrate do
     Storage.Lock.try_acquire_exclusive_lock(conn, -1, schema: schema)
   end
 
-  # Upstream can record its own 1.5.0, which would otherwise hide the fork's
-  # lock generation migration behind a version that is already recorded.
   defp available_migrations(conn, schema) do
-    migrations = newer_migrations(conn, schema)
+    migrations =
+      conn |> newer_migrations(schema) |> Enum.map(&{"v#{&1}", "migrations/v#{&1}.sql"})
 
-    if "1.5.0" in migrations or lock_generation?(conn, schema),
+    if lock_generation?(conn, schema),
       do: migrations,
-      else: migrations ++ ["1.5.0"]
+      else:
+        migrations ++
+          [{"subscription_lock_generation", "fork_migrations/subscription_lock_generation.sql"}]
   end
 
   defp lock_generation?(conn, schema) do
@@ -116,10 +117,10 @@ defmodule EventStore.Tasks.Migrate do
   end
 
   defp migrate(conn, schema, opts, migrations) do
-    for migration <- migrations do
-      write_info("Running migration v#{migration}...", opts)
+    for {migration, file} <- migrations do
+      write_info("Running migration #{migration}...", opts)
 
-      path = Application.app_dir(:eventstore, "priv/event_store/migrations/v#{migration}.sql")
+      path = Application.app_dir(:eventstore, "priv/event_store/#{file}")
       script = File.read!(path)
 
       statements = [

@@ -83,7 +83,7 @@ defmodule EventStore.MigrateEventStoreTest do
       migrate_eventstore(Keyword.put(config, :schema, "example"), quiet: true, is_mix: false)
 
       assert has_lock_generation?(config, "example")
-      assert "1.5.0" == latest_version(config, "example")
+      assert "1.3.2" == latest_version(config, "example")
       assert public_history == migration_history(config, "public")
     end
   end
