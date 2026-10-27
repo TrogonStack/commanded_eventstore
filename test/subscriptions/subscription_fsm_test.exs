@@ -262,6 +262,43 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert Process.read_timer(timer) in 30_001..45_000
     end
 
+    test "writes the position when the retry timer fires after the checkpoint interval",
+         context do
+      fsm =
+        fsm(context,
+          checkpoints_pending: 1,
+          last_ack: 3,
+          schema: "no_such_schema",
+          checkpoint_after: 20
+        )
+
+      %SubscriptionFsm{data: data} = SubscriptionFsm.checkpoint(fsm)
+
+      assert_receive :checkpoint, 1_000
+
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
+               SubscriptionFsm.checkpoint(fsm)
+
+      assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
+    end
+
+    test "sends the checkpoint message after the retry interval when it writes on every ack",
+         context do
+      fsm =
+        fsm(context,
+          checkpoints_pending: 1,
+          last_ack: 3,
+          schema: "no_such_schema",
+          retry_interval: 20
+        )
+
+      SubscriptionFsm.checkpoint(fsm)
+
+      assert_receive :checkpoint, 1_000
+    end
+
     test "writes from every state that owns a position", context do
       for state <- @persisting_states do
         fsm = fsm(context, state: state, checkpoints_pending: 1, last_ack: 3)
