@@ -13,12 +13,14 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
       )
 
     application_name = ListenerHelpers.unique_application_name("listen_gap")
+    connect_delay = start_supervised!({Agent, fn -> 0 end})
 
     start_supervised!(
       {TestEventStore,
        name: @store,
        schema: schema,
-       configure: {__MODULE__, :configure, [self()]},
+       timeout: 1_000,
+       configure: {__MODULE__, :configure, [self(), connect_delay]},
        session_mode_pool: [
          port: TcpProxy.port(proxy),
          idle_interval: 100,
@@ -29,7 +31,7 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
 
     ListenerHelpers.await_listening(conn, application_name)
 
-    [proxy: proxy, application_name: application_name]
+    [proxy: proxy, application_name: application_name, connect_delay: connect_delay]
   end
 
   test "a caught up subscription hears events appended while the notification connection was down",
@@ -60,8 +62,30 @@ defmodule EventStore.Subscriptions.SubscriptionListenGapTest do
     assert_receive {:configure, ^notifications}
   end
 
-  def configure(opts, test) do
+  test "a caught up subscription hears events appended while reconnecting takes longer than the query timeout",
+       %{conn: conn, application_name: application_name, connect_delay: connect_delay} do
+    {:ok, subscription} =
+      TestEventStore.subscribe_to_all_streams(UUID.uuid4(), self(), name: @store, buffer_size: 10)
+
+    assert_receive {:subscribed, ^subscription}
+
+    append(1)
+
+    assert_receive {:events, [%{event_number: 1}]}, 5_000
+    :ok = TestEventStore.ack(subscription, 1)
+
+    :ok = Agent.update(connect_delay, fn _delay -> 2_000 end)
+    terminate_listener(conn, application_name)
+
+    append(1)
+
+    assert_receive {:events, [%{event_number: 2}]}, 10_000
+  end
+
+  def configure(opts, test, connect_delay) do
     send(test, {:configure, self()})
+
+    connect_delay |> Agent.get(& &1) |> Process.sleep()
 
     opts
   end
