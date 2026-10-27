@@ -1,16 +1,24 @@
 defmodule EventStore.Streams.StreamReadFailureTest do
   use EventStore.StorageCase
 
-  alias EventStore.EventFactory
-  alias EventStore.UUID
+  alias EventStore.{EventFactory, ListenerHelpers, UUID}
 
   @name :impatient_reads
   @conn Module.concat([@name, Postgrex])
 
-  setup do
+  setup %{conn: conn} do
+    application_name = ListenerHelpers.unique_application_name("impatient_reads")
+
     start_supervised!(
-      {TestEventStore, name: @name, pool_size: 1, queue_target: 1, queue_interval: 1}
+      {TestEventStore,
+       name: @name,
+       pool_size: 1,
+       queue_target: 1,
+       queue_interval: 1,
+       session_mode_pool: [parameters: [application_name: application_name]]}
     )
+
+    ListenerHelpers.await_listening(conn, application_name)
 
     stream_uuid = UUID.uuid4()
 
