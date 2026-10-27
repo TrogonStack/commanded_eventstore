@@ -102,6 +102,45 @@ defmodule EventStore.Subscriptions.SubscriptionUnmigratedSchemaTest do
     assert log =~ ~s("#{schema}".subscriptions)
   end
 
+  test "a store reports each kind of claim problem it meets, once", %{conn: conn, schema: schema} do
+    role = "es_lock_role_" <> String.replace(UUID.uuid4(), "-", "")
+    password = UUID.uuid4()
+
+    on_exit(fn ->
+      add_lock_generation(conn)
+      drop_role(conn, schema, role)
+    end)
+
+    Postgrex.query!(conn, ~s(CREATE ROLE "#{role}" LOGIN PASSWORD '#{password}'), [])
+    Postgrex.query!(conn, ~s(GRANT USAGE ON SCHEMA "#{schema}" TO "#{role}"), [])
+    Postgrex.query!(conn, ~s(GRANT SELECT ON "#{schema}".subscriptions TO "#{role}"), [])
+
+    start_supervised!(
+      {TestEventStore,
+       name: :limited_lock_role_store,
+       schema: schema,
+       session_mode_pool: [username: role, password: password]},
+      id: :limited_lock_role_store
+    )
+
+    advisory_locks = Module.concat([:limited_lock_role_store, AdvisoryLocks])
+
+    log =
+      capture_log(fn ->
+        Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+        claim_repeatedly(advisory_locks, :undefined_column)
+
+        add_lock_generation(conn)
+        claim_repeatedly(advisory_locks, :insufficient_privilege)
+      end)
+
+    assert [_schema_outdated, _missing_grants] =
+             Regex.scan(~r/\[error\].*limited_lock_role_store/, log)
+
+    assert log =~ "mix event_store.migrate"
+    assert log =~ "UPDATE"
+  end
+
   # Every claim fails the same way, so each one is a chance to report it again.
   defp claim_repeatedly(advisory_locks, code) do
     for _attempt <- 1..3 do
