@@ -31,9 +31,15 @@ defmodule EventStore.Notifications.Supervisor do
     postgrex_notifications_conn = postgrex_notifications_conn(event_store, config)
 
     postgrex_notifications_config =
-      config
-      |> Config.postgrex_notifications_opts(postgrex_notifications_conn)
-      |> Keyword.put(:configure, {Listener, :connecting, [postgrex_notifications_conn]})
+      Config.postgrex_notifications_opts(config, postgrex_notifications_conn)
+
+    postgrex_notifications_config =
+      Keyword.put(
+        postgrex_notifications_config,
+        :configure,
+        {Listener, :connecting,
+         [postgrex_notifications_conn, Keyword.get(postgrex_notifications_config, :configure)]}
+      )
 
     hibernate_after = Subscriptions.hibernate_after(event_store, config)
 

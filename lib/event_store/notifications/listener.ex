@@ -49,12 +49,16 @@ defmodule EventStore.Notifications.Listener do
   # Run by the notifications connection before each attempt to connect. Notifications sent while
   # it is disconnected are never delivered, so every listener sharing the connection is told to
   # find out when it is listening again.
-  def connecting(opts, listen_to) do
+  def connecting(opts, listen_to, configure) do
     Registry.dispatch(Notifications.Registry, {__MODULE__, listen_to}, fn entries ->
       for {pid, _value} <- entries, do: send(pid, :connecting)
     end)
 
-    opts
+    case configure do
+      {module, fun, args} -> apply(module, fun, [opts | args])
+      fun when is_function(fun, 1) -> fun.(opts)
+      nil -> opts
+    end
   end
 
   def init(%Listener{} = state) do
