@@ -1,8 +1,8 @@
 DO $migration$
 BEGIN
-  -- Earlier fork releases added the lock generation and recorded it as schema
-  -- version 1.5.0, which would hide upstream migrations up to 1.5.0 from
-  -- upstream's migrate.
+  -- Unreleased builds of the fork added the lock generation and recorded it as
+  -- schema version 1.5.0, which would hide upstream migrations up to 1.5.0
+  -- from upstream's migrate.
   IF EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = current_schema()
