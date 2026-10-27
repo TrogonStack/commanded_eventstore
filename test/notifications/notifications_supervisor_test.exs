@@ -11,6 +11,10 @@ defmodule EventStore.Notifications.NotificationsSupervisorTest do
 
       conn = start_supervised!({Postgrex, config})
 
+      start_supervised!(
+        {Registry, keys: :unique, name: Module.concat([ES, EventStore.Subscriptions.Registry])}
+      )
+
       start_supervised!({Notifications.Supervisor, {ES, Keyword.put(config, :conn, conn)}})
 
       for child_spec <- PubSub.child_spec(ES), do: start_supervised!(child_spec)
