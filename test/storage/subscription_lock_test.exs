@@ -135,6 +135,53 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     assert :ok = Lock.unlock(conn, subscription_id, schema: schema)
   end
 
+  test "a claim gives up on a locked subscription row at the stricter session lock timeout",
+       context do
+    %{postgrex_config: postgrex_config, conn: conn, schema: schema} = context
+    %{subscription_id: subscription_id} = create_subscription(context)
+
+    claiming_conn =
+      start_supervised!(
+        {Postgrex,
+         Keyword.merge(postgrex_config, parameters: [lock_timeout: "100ms"], pool_size: 1)},
+        id: :claiming_conn
+      )
+
+    test_pid = self()
+
+    holder =
+      Task.async(fn ->
+        Postgrex.transaction(conn, fn holder_conn ->
+          Postgrex.query!(
+            holder_conn,
+            "SELECT subscription_id FROM \"#{schema}\".subscriptions WHERE subscription_id = $1 FOR UPDATE",
+            [subscription_id]
+          )
+
+          send(test_pid, :row_locked)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :row_locked
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} =
+             Lock.claim_subscription_lock(claiming_conn, subscription_id,
+               schema: schema,
+               timeout: 6_000
+             )
+
+    assert System.monotonic_time(:millisecond) - started_at < 2_000
+
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
+  end
+
   describe "ack with a fencing token" do
     test "a stale generation is fenced and leaves the position alone", context do
       %{conn: conn, schema: schema} = context
