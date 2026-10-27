@@ -1,7 +1,7 @@
 defmodule EventStore.AppendToStreamTest do
   use EventStore.StorageCase
 
-  alias EventStore.{EventFactory, UUID}
+  alias EventStore.{EventFactory, ListenerHelpers, UUID}
   alias TestEventStore, as: EventStore
 
   describe "append to new stream using `:any_version`" do
@@ -163,14 +163,49 @@ defmodule EventStore.AppendToStreamTest do
 
   @tag :slow
   @tag timeout: 180_000
-  test "should append many events to a stream" do
+  test "should append many events to a stream", %{conn: conn} do
+    application_name = ListenerHelpers.unique_application_name("many_events")
+
+    start_supervised!(
+      {EventStore,
+       name: :many_events, session_mode_pool: [parameters: [application_name: application_name]]},
+      id: :many_events
+    )
+
+    ListenerHelpers.await_listening(conn, application_name)
+
     stream_uuid = UUID.uuid4()
     events = EventFactory.create_events(8_001)
 
-    assert :ok = EventStore.append_to_stream(stream_uuid, 0, events, timeout: :infinity)
+    :ok = EventStore.subscribe(stream_uuid, name: :many_events)
+    :ok = EventStore.subscribe("$all", name: :many_events)
 
-    assert EventStore.stream_all_forward() |> Stream.map(& &1.event_number) |> Enum.to_list() ==
+    assert :ok =
+             EventStore.append_to_stream(stream_uuid, 0, events,
+               name: :many_events,
+               timeout: :infinity
+             )
+
+    # The notification publisher reads the appended events over the same
+    # single-connection pool, so wait for it to finish before streaming.
+    wait_until_published(8_001, 2)
+
+    assert EventStore.stream_all_forward(0, name: :many_events)
+           |> Stream.map(& &1.event_number)
+           |> Enum.to_list() ==
              Enum.to_list(1..8_001)
+  end
+
+  defp wait_until_published(_event_number, 0), do: :ok
+
+  defp wait_until_published(event_number, remaining) do
+    assert_receive {:events, [_ | _] = events}, 60_000
+
+    if List.last(events).event_number == event_number do
+      wait_until_published(event_number, remaining - 1)
+    else
+      wait_until_published(event_number, remaining)
+    end
   end
 
   defp append_events_to_stream(_context) do
