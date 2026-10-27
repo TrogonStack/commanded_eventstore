@@ -2,6 +2,10 @@ defmodule EventStore.Tasks.Migration do
   defstruct version: nil, state: :pending, migrated_at: nil
 end
 
+defmodule EventStore.Tasks.ForkMigration do
+  defstruct name: nil, state: :pending, migrated_at: nil
+end
+
 defmodule EventStore.Tasks.Migrations do
   @moduledoc """
   Task to show the migration status of EventStore
@@ -10,7 +14,7 @@ defmodule EventStore.Tasks.Migrations do
   import EventStore.Tasks.Output
 
   alias EventStore.Config
-  alias EventStore.Tasks.Migration
+  alias EventStore.Tasks.{ForkMigration, Migration}
 
   @available_migrations [
     "0.13.0",
@@ -65,6 +69,14 @@ defmodule EventStore.Tasks.Migrations do
   @doc false
   def available_fork_migrations(), do: @available_fork_migrations
 
+  defp list_migration(%ForkMigration{name: name, state: :pending}, opts) do
+    write_info("  #{name |> String.pad_trailing(10)}\tpending", opts)
+  end
+
+  defp list_migration(%ForkMigration{name: name, state: :completed, migrated_at: time}, opts) do
+    write_info("  #{name |> String.pad_trailing(10)}\tcompleted\t#{time}", opts)
+  end
+
   defp list_migration(%Migration{version: version, state: :pending}, opts) do
     write_info("  #{version |> String.pad_trailing(10)}\tpending", opts)
   end
@@ -86,27 +98,31 @@ defmodule EventStore.Tasks.Migrations do
     completed = query_schema_migrations(config, schema)
     latest_migration = completed |> Enum.reverse() |> Enum.at(0, nil)
 
-    pending = pending_migrations(latest_migration)
-
-    # Upstream can record its own 1.5.0, which would otherwise hide the fork's
-    # lock generation migration behind a version that is already recorded.
-    if Enum.any?(pending, &(&1.version == "1.5.0")) or lock_generation?(config, schema),
-      do: completed ++ pending,
-      else: completed ++ pending ++ [%Migration{version: "1.5.0"}]
+    completed ++ pending_migrations(latest_migration) ++ fork_migrations(config, schema)
   end
 
-  defp lock_generation?(config, schema) do
-    %Postgrex.Result{rows: [[exists]]} =
-      run_query(config, """
-        SELECT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = '#{schema}'
-          AND table_name = 'subscriptions'
-          AND column_name = 'lock_generation'
-        )
-      """)
+  defp fork_migrations(config, schema) do
+    completed = query_fork_schema_migrations(config, schema)
 
-    exists
+    Enum.map(@available_fork_migrations, fn name ->
+      Map.get(completed, name, %ForkMigration{name: name})
+    end)
+  end
+
+  defp query_fork_schema_migrations(config, schema) do
+    %Postgrex.Result{rows: [[exists]]} =
+      run_query(config, "SELECT to_regclass('\"#{schema}\".fork_schema_migrations') IS NOT NULL")
+
+    if exists do
+      %Postgrex.Result{rows: rows} =
+        run_query(config, ~s(SELECT name, migrated_at FROM "#{schema}".fork_schema_migrations))
+
+      Map.new(rows, fn [name, migrated_at] ->
+        {name, %ForkMigration{name: name, state: :completed, migrated_at: migrated_at}}
+      end)
+    else
+      %{}
+    end
   end
 
   defp pending_migrations(nil), do: @available_migrations
