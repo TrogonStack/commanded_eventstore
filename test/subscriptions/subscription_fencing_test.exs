@@ -1,25 +1,34 @@
 defmodule EventStore.Subscriptions.SubscriptionFencingTest do
   use EventStore.StorageCase
 
-  alias EventStore.{EventFactory, TcpProxy, UUID, Wait}
+  alias EventStore.{EventFactory, ListenerHelpers, TcpProxy, UUID, Wait}
   alias EventStore.Subscriptions.{FencingToken, Subscription}
 
   @store_a :fenced_store_a
   @store_b :fenced_store_b
 
-  setup %{config: config, schema: schema} do
+  setup %{config: config, conn: conn, schema: schema} do
     proxy =
       start_supervised!(
         {TcpProxy, {Keyword.fetch!(config, :hostname), Keyword.fetch!(config, :port)}}
       )
 
+    application_name = ListenerHelpers.unique_application_name("fenced_store_a")
+
     start_supervised!(
       {TestEventStore,
        name: @store_a,
        schema: schema,
-       session_mode_pool: [port: TcpProxy.port(proxy), timeout: 60_000, idle_interval: 100]},
+       session_mode_pool: [
+         port: TcpProxy.port(proxy),
+         timeout: 60_000,
+         idle_interval: 100,
+         parameters: [application_name: application_name]
+       ]},
       id: @store_a
     )
+
+    ListenerHelpers.await_listening(conn, application_name)
 
     start_supervised!({TestEventStore, name: @store_b, schema: schema}, id: @store_b)
 
