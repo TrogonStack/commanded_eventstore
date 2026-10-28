@@ -88,10 +88,12 @@ defmodule EventStore.CheckoutRetriesTest do
         name: :checkout_retries_direct_store
       )
 
+    stream_and_all_stream_reads = 2
+
     Wait.until(5_000, fn -> assert TcpProxy.severed(proxy) > 0 end)
     Process.sleep(500)
 
-    assert TcpProxy.severed(proxy) == 2
+    assert TcpProxy.severed(proxy) == stream_and_all_stream_reads * (0 + 1)
   end
 
   describe "a subscription" do
