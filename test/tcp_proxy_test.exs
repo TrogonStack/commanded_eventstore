@@ -7,11 +7,15 @@ defmodule EventStore.TcpProxyTest do
 
   test "accepts a burst of connections without resetting any of them" do
     config = Config.parsed(TestEventStore, :eventstore)
-    proxy = start_supervised!({TcpProxy, {Keyword.fetch!(config, :hostname), config[:port]}})
+
+    proxy =
+      start_supervised!(
+        {TcpProxy, {Keyword.fetch!(config, :hostname), config[:port], hold_accepts: true}}
+      )
+
     port = TcpProxy.port(proxy)
 
     owner = self()
-    :ok = TcpProxy.hold_accepts(proxy)
 
     tasks =
       Enum.map(1..@clients, fn _ ->
