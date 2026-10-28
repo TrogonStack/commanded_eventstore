@@ -40,7 +40,7 @@ defmodule EventStore.StorageCase do
 
   # Restore a dump of pre-migration database schema to run the test suite using
   # a migrated database.
-  defp restore_migration_database_dump(config) do
+  def restore_migration_database_dump(config) do
     EventStore.Storage.Database.drop(config)
     :ok = EventStore.Storage.Database.create(config)
 
