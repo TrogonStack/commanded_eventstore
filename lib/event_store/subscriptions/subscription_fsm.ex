@@ -247,7 +247,11 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       # Nothing can remain pending once the row is gone, because a checkpoint has nothing left to
       # be written to. A row that is still there keeps whatever was pending for it.
       :ok ->
-        {:ok, %__MODULE__{fsm | data: %SubscriptionState{data | checkpoints_pending: 0}}}
+        {:ok,
+         %__MODULE__{
+           fsm
+           | data: %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
+         }}
 
       {:error, _error} ->
         {reply, fsm}
@@ -743,7 +747,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   end
 
   defp maybe_persist_checkpoint(%SubscriptionState{transient: true} = data) do
-    %SubscriptionState{data | checkpoints_pending: 0}
+    %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
   end
 
   defp maybe_persist_checkpoint(%SubscriptionState{transient: false} = data) do
@@ -776,17 +780,20 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   end
 
   defp persist_checkpoint(%SubscriptionState{transient: true} = data) do
-    %SubscriptionState{data | checkpoints_pending: 0}
+    %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
   end
 
   defp persist_checkpoint(%SubscriptionState{transient: false} = data) do
-    %SubscriptionState{fencing_token: fencing_token, checkpoints_pending: checkpoints_pending} =
-      data
+    %SubscriptionState{
+      fencing_token: fencing_token,
+      checkpoints_pending: checkpoints_pending,
+      checkpoint_unwritten: checkpoint_unwritten
+    } = data
 
-    if checkpoints_pending > 0 and fencing_token != nil do
+    if (checkpoints_pending > 0 or checkpoint_unwritten) and fencing_token != nil do
       write_checkpoint(data)
     else
-      %SubscriptionState{data | checkpoints_pending: 0}
+      %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
     end
   end
 
@@ -823,23 +830,25 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     # instead and leaves its subscribers to subscribe from wherever the delete left them.
     case result do
       :ok ->
-        %SubscriptionState{data | checkpoints_pending: 0}
+        %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
 
       {:error, :subscription_not_found} ->
         send(self(), {:checkpoint_failed, :subscription_not_found})
 
-        %SubscriptionState{data | checkpoints_pending: 0}
+        %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
 
       {:error, :fenced} ->
         send(self(), {:fenced, lock_ref})
 
-        %SubscriptionState{data | checkpoints_pending: 0}
+        %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: false}
 
       # The position is still unwritten, so it is tried again even if no further ack arrives. A
       # subscription that writes on every ack has no interval of its own, and waits as long as it
-      # would to retry subscribing against the same database.
+      # would to retry subscribing against the same database. Acks count towards the threshold
+      # again from this attempt, so a database that keeps failing is not tried on every ack.
       {:error, _error} ->
-        schedule_checkpoint(data, checkpoint_retry_delay(data))
+        %SubscriptionState{data | checkpoints_pending: 0, checkpoint_unwritten: true}
+        |> schedule_checkpoint(checkpoint_retry_delay(data))
     end
   end
 

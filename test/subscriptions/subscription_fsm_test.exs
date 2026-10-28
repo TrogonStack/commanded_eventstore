@@ -179,7 +179,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       drop_privileges_after_update(context)
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 1}} =
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoint_unwritten: true}} =
                SubscriptionFsm.checkpoint(fsm)
 
       # Claiming the lock again would recreate a row that a delete removed, so only a probe that
@@ -383,6 +383,47 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
   end
 
+  describe "ack/3 after a checkpoint write failed" do
+    setup do
+      handler_id = {__MODULE__, make_ref()}
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:eventstore, :subscription_checkpoint, :start],
+          fn _event, _measurements, _metadata, _config -> send(test_pid, :checkpoint_attempt) end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    test "waits for another threshold of acks before writing again", context do
+      fsm = in_flight_fsm(context, 8, checkpoint_threshold: 5, schema: "no_such_schema")
+
+      fsm = Enum.reduce(1..8, fsm, &SubscriptionFsm.ack(&2, &1, self()))
+
+      assert %SubscriptionFsm{} = fsm
+      assert_received :checkpoint_attempt
+      refute_received :checkpoint_attempt
+    end
+
+    test "writes the latest acknowledged position when the retry fires", context do
+      fsm = in_flight_fsm(context, 8, checkpoint_threshold: 5, schema: "no_such_schema")
+
+      %SubscriptionFsm{data: %SubscriptionState{} = data} =
+        fsm = Enum.reduce(1..8, fsm, &SubscriptionFsm.ack(&2, &1, self()))
+
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
+               SubscriptionFsm.checkpoint(fsm)
+
+      assert {:ok, %Storage.Subscription{last_seen: 8}} = read_subscription(context)
+    end
+  end
+
   describe "subscribe/1 after another owner advanced the stored position" do
     test "catches up to the stored position and subscribes instead of spinning on empty reads",
          context do
@@ -419,6 +460,32 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert data.queue_size == 5
       assert data.last_received == 20
     end
+  end
+
+  defp in_flight_fsm(context, count, overrides) do
+    %SubscriptionFsm{data: data} = fsm = fsm(context, overrides)
+
+    events =
+      for number <- count..1//-1 do
+        %EventStore.RecordedEvent{event_number: number}
+      end
+
+    subscriber = %EventStore.Subscriptions.Subscriber{
+      pid: self(),
+      buffer_size: count,
+      in_flight: events,
+      last_sent: count
+    }
+
+    data = %SubscriptionState{
+      data
+      | subscribers: %{self() => subscriber},
+        in_flight_event_numbers: Enum.to_list(1..count),
+        last_sent: count,
+        last_received: count
+    }
+
+    %SubscriptionFsm{fsm | data: data}
   end
 
   defp reclaim_after_other_owner_acked(context, appended: appended, stored: stored) do
@@ -463,6 +530,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       last_ack: Keyword.get(overrides, :last_ack, 0),
       checkpoints_pending: Keyword.get(overrides, :checkpoints_pending, 0),
       checkpoint_after: Keyword.get(overrides, :checkpoint_after, 0),
+      checkpoint_threshold: Keyword.get(overrides, :checkpoint_threshold, 1),
       retry_interval: Keyword.get(overrides, :retry_interval, 60_000),
       query_timeout: 15_000,
       event_store: TestEventStore,
