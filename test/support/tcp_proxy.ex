@@ -41,6 +41,14 @@ defmodule EventStore.TcpProxy do
   """
   def severed(proxy), do: GenServer.call(proxy, :severed)
 
+  @doc """
+  Stops the acceptor from taking connections off the listen queue until
+  `release_accepts/1`, so the queue alone has to absorb a burst.
+  """
+  def hold_accepts(proxy), do: GenServer.call(proxy, :hold_accepts)
+
+  def release_accepts(proxy), do: GenServer.call(proxy, :release_accepts)
+
   def stop(proxy), do: GenServer.stop(proxy)
 
   @impl GenServer
@@ -72,7 +80,9 @@ defmodule EventStore.TcpProxy do
        held: [],
        relays: [],
        severing: MapSet.new(),
-       severed: 0
+       severed: 0,
+       gated: false,
+       waiting: []
      }}
   end
 
@@ -93,6 +103,17 @@ defmodule EventStore.TcpProxy do
     do: {:reply, :ok, %{state | mode: :blackhole, severing: MapSet.new(state.relays)}}
 
   def handle_call(:severed, _from, state), do: {:reply, state.severed, state}
+  def handle_call(:hold_accepts, _from, state), do: {:reply, :ok, %{state | gated: true}}
+
+  def handle_call(:release_accepts, _from, state) do
+    Enum.each(state.waiting, &GenServer.reply(&1, :ok))
+    {:reply, :ok, %{state | gated: false, waiting: []}}
+  end
+
+  def handle_call(:await_accepts, from, %{gated: true} = state),
+    do: {:noreply, %{state | waiting: [from | state.waiting]}}
+
+  def handle_call(:await_accepts, _from, state), do: {:reply, :ok, state}
   def handle_call(:blackhole, _from, state), do: {:reply, :ok, %{state | mode: :blackhole}}
 
   def handle_call({:hold, client}, _from, state),
@@ -119,6 +140,8 @@ defmodule EventStore.TcpProxy do
   end
 
   defp accept(listen, proxy, host, port) do
+    :ok = GenServer.call(proxy, :await_accepts, :infinity)
+
     case :gen_tcp.accept(listen) do
       {:ok, client} ->
         case GenServer.call(proxy, :mode) do

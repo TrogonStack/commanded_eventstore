@@ -11,17 +11,22 @@ defmodule EventStore.TcpProxyTest do
     port = TcpProxy.port(proxy)
 
     owner = self()
+    :ok = TcpProxy.hold_accepts(proxy)
 
-    sockets =
-      1..@clients
-      |> Enum.map(fn _ ->
+    tasks =
+      Enum.map(1..@clients, fn _ ->
         Task.async(fn ->
-          {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+          {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 2_000)
           :ok = :gen_tcp.controlling_process(socket, owner)
+          send(owner, {:connected, socket})
           socket
         end)
       end)
-      |> Task.await_many()
+
+    for _ <- 1..@clients, do: assert_receive({:connected, _socket}, 2_000)
+
+    :ok = TcpProxy.release_accepts(proxy)
+    sockets = Task.await_many(tasks)
 
     Process.sleep(200)
 
