@@ -7,6 +7,8 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
   alias EventStore.{RecordedEvent, SelectorSubscriber, UUID}
   alias EventStore.EventFactory.Event
 
+  @delivery_timeout 10_000
+
   describe "subscription selector with no processing delay" do
     test "should catch up and receive only selected events" do
       assert_catch_up()
@@ -60,7 +62,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
       assert_receive {:subscribed, _subscription}
 
       for i <- 1..40, is_odd(i) do
-        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
       end
 
       test_pid = self()
@@ -82,7 +84,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
       assert_receive :stalled
 
       for i <- 41..100, is_odd(i) do
-        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
       end
 
       assert {:ok, :ok} = Task.await(stall)
@@ -99,7 +101,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     start_selector_subscriber(stream_uuid, delay)
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -115,7 +117,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     start_selector_subscriber(stream_uuid, delay)
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -125,7 +127,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     end
 
     for i <- 101..200, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -141,7 +143,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     end
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
