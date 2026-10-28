@@ -40,11 +40,34 @@ defmodule EventStore.StorageCase do
 
   # Restore a dump of pre-migration database schema to run the test suite using
   # a migrated database.
-  defp restore_migration_database_dump(config) do
-    EventStore.Storage.Database.drop(config)
+  def restore_migration_database_dump(config) do
+    terminate_other_sessions(config)
+
+    :ok = drop_database(config)
     :ok = EventStore.Storage.Database.create(config)
 
     {_, 0} = EventStore.Storage.Database.restore(config, "test/fixture/eventstore.dump")
+  end
+
+  defp terminate_other_sessions(config) do
+    database = Keyword.fetch!(config, :database)
+
+    admin_config =
+      Keyword.put(config, :database, Keyword.get(config, :default_database, "postgres"))
+
+    :ok =
+      EventStore.Storage.Database.execute(
+        admin_config,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity " <>
+          "WHERE datname = '#{database}' AND pid <> pg_backend_pid()"
+      )
+  end
+
+  defp drop_database(config) do
+    case EventStore.Storage.Database.drop(config) do
+      :ok -> :ok
+      {:error, :already_down} -> :ok
+    end
   end
 
   defp migrate_eventstore(config) do

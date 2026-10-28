@@ -295,10 +295,7 @@ defmodule EventStore.MigrateEventStoreTest do
   end
 
   defp restore_pre_migration_event_store(config) do
-    EventStore.Storage.Database.drop(config)
-    :ok = EventStore.Storage.Database.create(config)
-
-    {_, 0} = EventStore.Storage.Database.restore(config, "test/fixture/eventstore.dump")
+    EventStore.StorageCase.restore_migration_database_dump(config)
   end
 
   defp migrate_eventstore(config, opts) do
