@@ -7,6 +7,8 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
   alias EventStore.{RecordedEvent, SelectorSubscriber, UUID}
   alias EventStore.EventFactory.Event
 
+  @delivery_timeout 10_000
+
   describe "subscription selector with no processing delay" do
     test "should catch up and receive only selected events" do
       assert_catch_up()
@@ -42,6 +44,53 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     end
   end
 
+  describe "subscription selector while the checkpoint write is stalled" do
+    test "should resume receiving only selected events once the stall ends", %{
+      conn: conn,
+      schema: schema
+    } do
+      stream_uuid = UUID.uuid4()
+      subscription_name = UUID.uuid4()
+
+      for i <- 1..100 do
+        :ok = append_to_stream(stream_uuid, 1, i - 1)
+      end
+
+      {:ok, _pid} =
+        SelectorSubscriber.start_link(TestEventStore, stream_uuid, subscription_name, self(), 1)
+
+      assert_receive {:subscribed, _subscription}
+
+      for i <- 1..40, is_odd(i) do
+        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
+      end
+
+      test_pid = self()
+
+      stall =
+        Task.async(fn ->
+          Postgrex.transaction(conn, fn conn ->
+            Postgrex.query!(
+              conn,
+              ~s(SELECT 1 FROM "#{schema}".subscriptions WHERE subscription_name = $1 FOR UPDATE),
+              [subscription_name]
+            )
+
+            send(test_pid, :stalled)
+            Process.sleep(2_500)
+          end)
+        end)
+
+      assert_receive :stalled
+
+      for i <- 41..100, is_odd(i) do
+        assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
+      end
+
+      assert {:ok, :ok} = Task.await(stall)
+    end
+  end
+
   defp assert_catch_up(delay \\ 0) do
     stream_uuid = UUID.uuid4()
 
@@ -52,7 +101,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     start_selector_subscriber(stream_uuid, delay)
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -68,7 +117,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     start_selector_subscriber(stream_uuid, delay)
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -78,7 +127,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     end
 
     for i <- 101..200, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
@@ -94,7 +143,7 @@ defmodule EventStore.Subscriptions.SubscriptionSelectorTest do
     end
 
     for i <- 1..100, is_odd(i) do
-      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}
+      assert_receive {:events, [%RecordedEvent{data: %Event{event: ^i}}]}, @delivery_timeout
     end
 
     refute_receive {:events, _events}
