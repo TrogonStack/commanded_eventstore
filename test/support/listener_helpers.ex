@@ -7,8 +7,8 @@ defmodule EventStore.ListenerHelpers do
 
   # A notification sent before the listener's LISTEN has completed is lost, and nothing else
   # would deliver events appended after a subscription has caught up.
-  def await_listening(conn, application_name) do
-    Wait.until(10_000, fn ->
+  def await_listening(conn, application_name, timeout \\ 10_000) do
+    Wait.until(timeout, fn ->
       assert %Postgrex.Result{rows: [[true]]} =
                Postgrex.query!(
                  conn,
