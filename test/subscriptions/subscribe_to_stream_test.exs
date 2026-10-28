@@ -24,6 +24,31 @@ defmodule EventStore.Subscriptions.SubscribeToStreamTest do
     {:ok, %{subscription_name: subscription_name}}
   end
 
+  describe "process label" do
+    test "identifies the event store, stream and subscription it serves", %{
+      schema: schema,
+      serializer: serializer,
+      subscription_name: subscription_name
+    } do
+      stream_uuid = UUID.uuid4()
+
+      {:ok, subscription} =
+        Subscriptions.subscribe_to_stream(self(),
+          event_store: @event_store,
+          conn: @conn,
+          schema: schema,
+          serializer: serializer,
+          hibernate_after: 15_000,
+          retry_interval: 1_000,
+          stream_uuid: stream_uuid,
+          subscription_name: subscription_name
+        )
+
+      assert :proc_lib.get_label(subscription) ==
+               {Subscription, @event_store, stream_uuid, subscription_name}
+    end
+  end
+
   describe "single stream subscription" do
     setup [:append_events_to_another_stream]
 
