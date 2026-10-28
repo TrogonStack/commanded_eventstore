@@ -1,5 +1,5 @@
 defmodule EventStore.CheckoutRetriesTest do
-  use ExUnit.Case, async: false
+  use EventStore.StorageCase
 
   alias EventStore.{Config, EventFactory, ListenerHelpers, Serializer, TcpProxy, UUID, Wait}
   alias EventStore.Subscriptions.{FencingToken, SubscriptionFsm, SubscriptionState}
