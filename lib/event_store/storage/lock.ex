@@ -61,10 +61,12 @@ defmodule EventStore.Storage.Lock do
   def claim_subscription_lock(conn, subscription_id, opts) do
     {schema, opts} = Keyword.pop(opts, :schema)
 
-    # Every wait happens before the advisory lock is tried, so a failed claim
-    # never has to give back a lock that may be a hold its owner already had.
+    # The transaction scoped lock tells a lost claim apart before the row is
+    # written, and it ends with the transaction, so a failed claim never has to
+    # give back a session lock that may be a hold its owner already had.
     with_bounded_lock_wait(conn, opts, fn conn ->
-      with {:ok, %FencingToken{} = token, last_seen} <-
+      with :ok <- try_acquire_exclusive_transaction_lock(conn, subscription_id, schema, opts),
+           {:ok, %FencingToken{} = token, last_seen} <-
              bump_lock_generation(conn, subscription_id, schema, opts),
            {:ok, %Session{} = session} <-
              try_acquire_exclusive_session_lock(conn, subscription_id, [schema: schema] ++ opts) do
@@ -81,6 +83,16 @@ defmodule EventStore.Storage.Lock do
     case Postgrex.query(conn, query, [key], opts) do
       {:ok, %Postgrex.Result{rows: [[true]]}} -> :ok
       {:ok, %Postgrex.Result{rows: [[false]]}} -> :ok
+      {:error, _error} = reply -> reply
+    end
+  end
+
+  defp try_acquire_exclusive_transaction_lock(conn, subscription_id, schema, opts) do
+    query = Statements.try_advisory_xact_lock(schema)
+
+    case Postgrex.query(conn, query, [subscription_id], opts) do
+      {:ok, %Postgrex.Result{rows: [[true]]}} -> :ok
+      {:ok, %Postgrex.Result{rows: [[false]]}} -> {:error, :lock_already_taken}
       {:error, _error} = reply -> reply
     end
   end
