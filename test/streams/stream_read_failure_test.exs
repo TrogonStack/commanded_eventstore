@@ -42,6 +42,8 @@ defmodule EventStore.Streams.StreamReadFailureTest do
         assert_raise EventStore.StreamReadError, fn -> Enum.to_list(stream) end
 
       assert error.stream_uuid == stream_uuid
+      assert error.direction == :forward
+      assert Exception.message(error) =~ "#{inspect(stream_uuid)} forward"
       assert error.reason =~ "connection not available"
     end)
   end
@@ -54,6 +56,8 @@ defmodule EventStore.Streams.StreamReadFailureTest do
         assert_raise EventStore.StreamReadError, fn -> Enum.to_list(stream) end
 
       assert error.stream_uuid == stream_uuid
+      assert error.direction == :backward
+      assert Exception.message(error) =~ "#{inspect(stream_uuid)} backward"
       assert error.reason =~ "connection not available"
     end)
   end
