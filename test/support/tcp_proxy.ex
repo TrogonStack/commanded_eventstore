@@ -46,7 +46,13 @@ defmodule EventStore.TcpProxy do
   @impl GenServer
   def init({host, port}) do
     {:ok, listen} =
-      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+      :gen_tcp.listen(0, [
+        :binary,
+        active: false,
+        reuseaddr: true,
+        backlog: 1024,
+        ip: {127, 0, 0, 1}
+      ])
 
     {:ok, listen_port} = :inet.port(listen)
     proxy = self()
