@@ -183,6 +183,7 @@ defmodule EventStore.Config do
     config
     |> session_mode_pool_config()
     |> default_postgrex_opts()
+    |> Keyword.delete(:idle_interval)
     |> Keyword.put(:auto_reconnect, true)
     |> Keyword.put(:backoff_type, :exp)
     |> Keyword.put(:pool_size, 1)

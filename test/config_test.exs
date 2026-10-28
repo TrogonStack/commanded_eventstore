@@ -224,6 +224,19 @@ defmodule EventStore.ConfigTest do
     end
   end
 
+  describe "notifications connection" do
+    test "does not inherit the keepalive interval of the session mode pool" do
+      config =
+        Config.parse(
+          url: "postgres://username:password@localhost/database",
+          session_mode_pool: [idle_interval: 100]
+        )
+
+      assert Config.advisory_locks_postgrex_opts(config)[:idle_interval] == 100
+      refute Keyword.has_key?(Config.postgrex_notifications_opts(config, :name), :idle_interval)
+    end
+  end
+
   describe "add connection listener" do
     test "adds the listener as a `{name, node}` tuple" do
       opts = Config.add_connection_listener([], :listener)
