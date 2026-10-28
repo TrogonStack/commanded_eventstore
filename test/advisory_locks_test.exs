@@ -1213,6 +1213,65 @@ defmodule EventStore.AdvisoryLocksTest do
     end
   end
 
+  describe "lock session ends while subscription lock claims are queued and new connections hang" do
+    @tag capture_log: true
+    test "should send `lock_released` message before a claim that failed to begin retries on the pool",
+         %{conn: conn, schema: schema} = context do
+      %{subscription_id: subscription_id} = create_subscription(context)
+
+      {locks, proxy} =
+        start_proxied_lock_store(:failover_claim_store, schema, idle_interval: 60_000)
+
+      lock_pool = Module.concat([locks, Postgrex])
+
+      try do
+        {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+        lock_connection = lock_connection_pid(lock_pool)
+        backend_pid = backend_pid(lock_pool)
+
+        :ok = EventStore.TcpProxy.blackhole(proxy)
+
+        %Postgrex.Result{rows: [[true]]} =
+          Postgrex.query!(conn, "SELECT pg_terminate_backend($1)", [backend_pid])
+
+        :ok = :sys.suspend(lock_connection)
+
+        for _claim <- 1..4,
+            do: spawn(fn -> AdvisoryLocks.try_subscription_lock(locks, subscription_id) end)
+
+        Wait.until(fn ->
+          {:messages, messages} = Process.info(lock_connection, :messages)
+          assert messages != []
+        end)
+
+        :ok = :sys.resume(lock_connection)
+
+        assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_000
+      after
+        stop_supervised!(EventStore.TcpProxy)
+      end
+    end
+  end
+
+  describe "lock session ends while a release is queued and new connections hang" do
+    @tag capture_log: true
+    test "should send `lock_released` message before a release by reference waits on the pool",
+         context do
+      lock_released_before_queued_release(context, fn locks, owners ->
+        for {_owner, ref} <- owners, do: AdvisoryLocks.release(locks, ref)
+      end)
+    end
+
+    @tag capture_log: true
+    test "should send `lock_released` message before the termination of an owner waits on the pool",
+         context do
+      lock_released_before_queued_release(context, fn _locks, owners ->
+        for {owner, _ref} <- owners, do: Process.exit(owner, :kill)
+      end)
+    end
+  end
+
   # An event store whose lock connection goes through a proxy that can stop answering.
   defp start_proxied_lock_store(name, schema, session_mode_pool_opts) do
     config = Config.parsed(TestEventStore, :eventstore)
@@ -1234,6 +1293,60 @@ defmodule EventStore.AdvisoryLocksTest do
     )
 
     {Module.concat([name, AdvisoryLocks]), proxy}
+  end
+
+  defp lock_released_before_queued_release(%{schema: schema}, release) do
+    {locks, proxy} =
+      start_proxied_lock_store(:queued_release_store, schema, idle_interval: 60_000)
+
+    server = Process.whereis(locks)
+    test_process = self()
+
+    try do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks, 1)
+
+      owners =
+        for key <- 2..5 do
+          owner =
+            spawn(fn ->
+              send(
+                test_process,
+                {:owner_acquired, self(), AdvisoryLocks.try_advisory_lock(locks, key)}
+              )
+
+              Process.sleep(:infinity)
+            end)
+
+          assert_receive {:owner_acquired, ^owner, {:ok, ref}}
+
+          {owner, ref}
+        end
+
+      :ok = EventStore.TcpProxy.freeze(proxy)
+
+      spawn(fn -> AdvisoryLocks.try_advisory_lock(locks, 6, 500) end)
+
+      Wait.until(fn -> assert {:timeout, _} = catch_exit(:sys.get_state(server, 10)) end)
+
+      release.(locks, owners)
+
+      Wait.until(fn ->
+        {:messages, messages} = Process.info(server, :messages)
+
+        queued =
+          Enum.count(messages, fn
+            {:"$gen_cast", {:release, _ref}} -> true
+            {:DOWN, _ref, :process, _owner, _reason} -> true
+            _message -> false
+          end)
+
+        assert queued == length(owners)
+      end)
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_500
+    after
+      stop_supervised!(EventStore.TcpProxy)
+    end
   end
 
   # A lock server whose queries give up on a busy connection almost at once.
