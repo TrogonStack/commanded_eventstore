@@ -179,7 +179,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       drop_privileges_after_update(context)
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 1}} =
+      assert %SubscriptionFsm{data: %SubscriptionState{checkpoint_unwritten: true}} =
                SubscriptionFsm.checkpoint(fsm)
 
       # Claiming the lock again would recreate a row that a delete removed, so only a probe that

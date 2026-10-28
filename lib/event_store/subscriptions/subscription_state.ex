@@ -34,6 +34,7 @@ defmodule EventStore.Subscriptions.SubscriptionState do
     checkpoint_threshold: 1,
     checkpoint_timer_ref: nil,
     checkpoints_pending: 0,
+    checkpoint_unwritten: false,
     subscribers: %{},
     partitions: %{},
     acknowledged_event_numbers: MapSet.new(),
@@ -48,7 +49,8 @@ defmodule EventStore.Subscriptions.SubscriptionState do
         partitions: %{},
         acknowledged_event_numbers: MapSet.new(),
         in_flight_event_numbers: [],
-        checkpoints_pending: 0
+        checkpoints_pending: 0,
+        checkpoint_unwritten: false
     }
   end
 
