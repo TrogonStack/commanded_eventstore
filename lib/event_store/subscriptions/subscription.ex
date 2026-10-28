@@ -115,6 +115,13 @@ defmodule EventStore.Subscriptions.Subscription do
   @doc false
   @impl GenServer
   def init(%Subscription{} = state) do
+    %Subscription{
+      stream_uuid: stream_uuid,
+      subscription_name: subscription_name,
+      subscription: %SubscriptionFsm{data: %SubscriptionState{event_store: event_store}}
+    } = state
+
+    Process.set_label({Subscription, event_store, stream_uuid, subscription_name})
     Process.flag(:trap_exit, true)
 
     {:ok, state}
