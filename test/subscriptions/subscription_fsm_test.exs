@@ -503,8 +503,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     test "keeps the subscription alive instead of crashing", context do
       fsm = fsm(context, state: :request_catch_up, schema: "no_such_schema")
 
-      assert %SubscriptionFsm{state: state} = SubscriptionFsm.catch_up(fsm)
-      assert state in [:request_catch_up, :catching_up]
+      assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
     end
 
     test "asks to read again after the retry interval", context do
@@ -520,16 +519,25 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       fsm =
         fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 20)
 
+      fsm = SubscriptionFsm.connect_subscriber(fsm, self(), buffer_size: 10)
+
       %SubscriptionFsm{data: data} = failed = SubscriptionFsm.catch_up(fsm)
 
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
+
       assert_receive :retry_catch_up, 1_000
+      refute_received {:events, _events}
 
       recovered = %SubscriptionFsm{
         failed
         | data: %SubscriptionState{data | schema: context.schema}
       }
 
-      assert %SubscriptionFsm{state: :subscribed} = SubscriptionFsm.retry_catch_up(recovered)
+      assert %SubscriptionFsm{state: :request_catch_up, data: data} =
+               SubscriptionFsm.retry_catch_up(recovered)
+
+      assert data.last_sent == 3
+      assert_received {:events, [%{event_number: 1}, %{event_number: 2}, %{event_number: 3}]}
     end
 
     test "ignores a retry for a subscription that is no longer waiting on one", context do
