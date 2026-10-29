@@ -782,6 +782,27 @@ defmodule EventStore.AdvisoryLocksTest do
       assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 1_000)
     end
 
+    test "should stop retrying verification when the lock pool goes down" do
+      {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer, ref: ref} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      send(@locks, {:DOWN, ref, :process, self(), :killed})
+
+      assert %{verify_timer: nil} = :sys.get_state(@locks)
+      assert Process.read_timer(timer) == false
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+    end
+
     test "should keep running when the lock pool monitor does not answer" do
       locks = Process.whereis(@locks)
 
