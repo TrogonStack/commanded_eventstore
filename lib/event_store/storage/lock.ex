@@ -61,11 +61,14 @@ defmodule EventStore.Storage.Lock do
   def claim_subscription_lock(conn, subscription_id, opts) do
     {schema, opts} = Keyword.pop(opts, :schema)
 
+    # The probe fails on a schema or lock role that cannot write the row without
+    # writing it, so a node that loses every claim still learns of the problem.
     # The transaction scoped lock tells a lost claim apart before the row is
     # written, and it ends with the transaction, so a failed claim never has to
     # give back a session lock that may be a hold its owner already had.
     with_bounded_lock_wait(conn, opts, fn conn ->
-      with :ok <- try_acquire_exclusive_transaction_lock(conn, subscription_id, schema, opts),
+      with :ok <- probe_lock_generation(conn, schema, opts),
+           :ok <- try_acquire_exclusive_transaction_lock(conn, subscription_id, schema, opts),
            {:ok, %FencingToken{} = token, last_seen} <-
              bump_lock_generation(conn, subscription_id, schema, opts),
            {:ok, %Session{} = session} <-
@@ -83,6 +86,13 @@ defmodule EventStore.Storage.Lock do
     case Postgrex.query(conn, query, [key], opts) do
       {:ok, %Postgrex.Result{rows: [[true]]}} -> :ok
       {:ok, %Postgrex.Result{rows: [[false]]}} -> :ok
+      {:error, _error} = reply -> reply
+    end
+  end
+
+  defp probe_lock_generation(conn, schema, opts) do
+    case Postgrex.query(conn, Statements.probe_lock_generation(schema), [], opts) do
+      {:ok, %Postgrex.Result{}} -> :ok
       {:error, _error} = reply -> reply
     end
   end

@@ -24,6 +24,7 @@ defmodule EventStore.Sql.Statements do
         {:advisory_unlock, [:schema]},
         {:bound_lock_wait, []},
         {:bump_lock_generation, [:schema]},
+        {:probe_lock_generation, [:schema]},
         {:subscription_ack, [:schema]},
         {:insert_snapshot, [:schema]},
         {:delete_snapshot, [:schema]},

@@ -3,7 +3,7 @@ defmodule EventStore.Subscriptions.SubscriptionUnmigratedSchemaTest do
 
   import ExUnit.CaptureLog
 
-  alias EventStore.{AdvisoryLocks, EventFactory, UUID, Wait}
+  alias EventStore.{AdvisoryLocks, EventFactory, Storage, UUID, Wait}
   alias EventStore.Subscriptions.Subscription
 
   @advisory_locks TestEventStore.EventStore.AdvisoryLocks
@@ -60,6 +60,74 @@ defmodule EventStore.Subscriptions.SubscriptionUnmigratedSchemaTest do
     assert [_reported] = Regex.scan(~r/\[error\].*TestEventStore/, log)
     assert log =~ "v1.5.0"
     assert log =~ "mix event_store.migrate"
+  end
+
+  test "a database without the lock generation tells the operator to migrate while every claim loses",
+       %{conn: conn, schema: schema, postgrex_config: postgrex_config} do
+    on_exit(fn -> add_lock_generation(conn) end)
+
+    {:ok, holder} = Postgrex.start_link(postgrex_config)
+    :ok = Storage.Lock.try_acquire_exclusive_lock(holder, 1, schema: schema)
+
+    Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+
+    log =
+      capture_log(fn ->
+        claim_repeatedly(@advisory_locks, :undefined_column)
+      end)
+
+    assert [_reported] = Regex.scan(~r/\[error\].*TestEventStore/, log)
+    assert log =~ "mix event_store.migrate"
+  end
+
+  test "a session pool role that cannot update subscriptions is named while every claim loses",
+       %{conn: conn, schema: schema, postgrex_config: postgrex_config} do
+    role = "es_lock_role_" <> String.replace(UUID.uuid4(), "-", "")
+    password = UUID.uuid4()
+
+    on_exit(fn -> drop_role(conn, schema, role) end)
+
+    Postgrex.query!(conn, ~s(CREATE ROLE "#{role}" LOGIN PASSWORD '#{password}'), [])
+    Postgrex.query!(conn, ~s(GRANT USAGE ON SCHEMA "#{schema}" TO "#{role}"), [])
+    Postgrex.query!(conn, ~s(GRANT SELECT ON "#{schema}".subscriptions TO "#{role}"), [])
+
+    start_supervised!(
+      {TestEventStore,
+       name: :limited_lock_role_store,
+       schema: schema,
+       session_mode_pool: [username: role, password: password]},
+      id: :limited_lock_role_store
+    )
+
+    {:ok, holder} = Postgrex.start_link(postgrex_config)
+    :ok = Storage.Lock.try_acquire_exclusive_lock(holder, 1, schema: schema)
+
+    log =
+      capture_log(fn ->
+        claim_repeatedly(
+          Module.concat([:limited_lock_role_store, AdvisoryLocks]),
+          :insufficient_privilege
+        )
+      end)
+
+    assert [_reported] = Regex.scan(~r/\[error\].*limited_lock_role_store/, log)
+    assert log =~ "UPDATE"
+  end
+
+  test "a claim that loses on a migrated schema still reports nothing",
+       %{schema: schema, postgrex_config: postgrex_config} do
+    {:ok, holder} = Postgrex.start_link(postgrex_config)
+    :ok = Storage.Lock.try_acquire_exclusive_lock(holder, 1, schema: schema)
+
+    log =
+      capture_log(fn ->
+        for _attempt <- 1..3 do
+          assert {:error, :lock_already_taken} =
+                   AdvisoryLocks.try_subscription_lock(@advisory_locks, 1, 5_000)
+        end
+      end)
+
+    refute log =~ "[error]"
   end
 
   test "a session pool role that cannot update subscriptions is named as the cause, once",
