@@ -1,0 +1,3 @@
+UPDATE "<%= schema %>".subscriptions
+SET lock_generation = lock_generation
+WHERE false;
