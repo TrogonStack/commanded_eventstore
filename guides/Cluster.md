@@ -25,6 +25,26 @@ Subscriptions hold their locks on a dedicated connection. When the database stop
 
 PostgreSQL only releases the locks of a session once it notices the client is gone. When a node's host dies or the network drops without closing the connection, the server only notices through TCP keepalives, which with the Linux defaults takes over two hours. Set `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count` together on the server to shorten it, for example to 10, 5 and 3 for a release within about 25 seconds; `tcp_keepalives_idle` alone still leaves the probes to the default interval and count, and `client_connection_check_interval` does not help, since it only notices a connection the operating system already knows is closed. Until then no other node can take the lock, so a slow release delays the hand-off but never lets two nodes record progress at the same time.
 
+### Keepalives when PgBouncer is in front of the lock connection
+
+When `session_mode_url` points at PgBouncer in session mode, as suggested in [Using with PgBouncer](Getting Started.md#using-with-pgbouncer), the server's keepalives no longer protect you. The client of the lock session, as PostgreSQL sees it, is PgBouncer, which is still running after a node's host dies, so the server finds nothing wrong and the session keeps its advisory locks. They are released only when PgBouncer notices that its own client is gone and resets the server connection. By default PgBouncer leaves that to the operating system's keepalive settings, which on Linux means 7,200 seconds before the first probe and then 9 probes 75 seconds apart, about 2 hours and 11 minutes, during which no other node can take over the subscriptions.
+
+Configure the keepalives on PgBouncer as well, in the `[pgbouncer]` section of `pgbouncer.ini`, with the same values as the server advice above:
+
+```ini
+[pgbouncer]
+tcp_keepalive = 1
+tcp_keepidle = 10
+tcp_keepintvl = 5
+tcp_keepcnt = 3
+```
+
+`tcp_keepalive` is on by default and uses the operating system's values; `tcp_keepidle`, `tcp_keepintvl` and `tcp_keepcnt` are unset by default and override them, so set them together. In a test that cut a node off from PgBouncer, these values released the lock after about 27 seconds, the same as a connection straight to PostgreSQL, while with the defaults it was still held after 120 seconds. Keep the server's own keepalives as well, since they cover PgBouncer's host dying.
+
+Do not use PgBouncer's `client_idle_timeout` for this. The lock connection is idle between queries by design, so the timeout would close healthy lock sessions and make subscriptions lose their locks.
+
+Keepalives set on the node's side, such as `socket_options: [keepalive: true]` in `session_mode_pool`, do not help here. Those probes are sent by the node's host, which is the machine that died, so nothing is left to send them.
+
 ## Automatic cluster formation
 
 You can use [libcluster](https://github.com/bitwalker/libcluster) to automatically form clusters of Erlang nodes, with either static or dynamic node membership.
