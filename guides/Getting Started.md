@@ -252,3 +252,5 @@ config :my_app, MyApp.EventStore,
 ```
 
 This will allow the EventStore to use your regular pool settings to connect to the database defined in `url` for most database operations. It will separately establish connections using the `session_mode_url` where necessary which you should point to PgBouncer in session mode or connected directly to the Postgres instance.
+
+When the session connection goes through PgBouncer, configure TCP keepalives on PgBouncer too, so a dead node's subscription locks are released promptly. See [Keepalives when PgBouncer is in front of the lock connection](Cluster.md#keepalives-when-pgbouncer-is-in-front-of-the-lock-connection).
