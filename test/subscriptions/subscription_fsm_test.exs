@@ -499,6 +499,46 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
   end
 
+  describe "catch_up/1 when reading the stream fails" do
+    test "keeps the subscription alive instead of crashing", context do
+      fsm = fsm(context, state: :request_catch_up, schema: "no_such_schema")
+
+      assert %SubscriptionFsm{state: state} = SubscriptionFsm.catch_up(fsm)
+      assert state in [:request_catch_up, :catching_up]
+    end
+
+    test "asks to read again after the retry interval", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 20)
+
+      SubscriptionFsm.catch_up(fsm)
+
+      assert_receive :retry_catch_up, 1_000
+    end
+
+    test "reads again and delivers events once storage recovers", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 20)
+
+      %SubscriptionFsm{data: data} = failed = SubscriptionFsm.catch_up(fsm)
+
+      assert_receive :retry_catch_up, 1_000
+
+      recovered = %SubscriptionFsm{
+        failed
+        | data: %SubscriptionState{data | schema: context.schema}
+      }
+
+      assert %SubscriptionFsm{state: :subscribed} = SubscriptionFsm.retry_catch_up(recovered)
+    end
+
+    test "ignores a retry for a subscription that is no longer waiting on one", context do
+      fsm = fsm(context, state: :subscribed)
+
+      assert ^fsm = SubscriptionFsm.retry_catch_up(fsm)
+    end
+  end
+
   defp in_flight_fsm(context, count, overrides) do
     %SubscriptionFsm{data: data} = fsm = fsm(context, overrides)
 
