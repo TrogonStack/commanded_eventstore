@@ -232,17 +232,38 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     %{subscription_id: subscription_id} = create_subscription(context)
 
     {:ok, owner} = Postgrex.start_link(postgrex_config)
+    {:ok, claimer} = Postgrex.start_link(Keyword.put(postgrex_config, :pool_size, 1))
 
     assert {:ok, _lease} = Lock.claim_subscription_lock(owner, subscription_id, schema: schema)
 
-    before_claims = txid_current(conn)
+    %Postgrex.Result{rows: [[claimer_pid]]} =
+      Postgrex.query!(claimer, "SELECT pg_backend_pid()", [])
+
+    test_pid = self()
+
+    observe_open_transaction = fn _entry ->
+      %Postgrex.Result{rows: [[xid]]} =
+        Postgrex.query!(
+          conn,
+          "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = $1",
+          [claimer_pid]
+        )
+
+      send(test_pid, {:backend_xid, xid})
+    end
 
     for _ <- 1..5 do
       assert {:error, :lock_already_taken} =
-               Lock.claim_subscription_lock(conn, subscription_id, schema: schema)
+               Lock.claim_subscription_lock(claimer, subscription_id,
+                 schema: schema,
+                 log: observe_open_transaction
+               )
     end
 
-    assert txid_current(conn) == before_claims + 1
+    observed = drain_backend_xids()
+
+    assert observed != []
+    assert Enum.all?(observed, &is_nil/1)
 
     ProcessHelper.shutdown(owner)
   end
@@ -320,9 +341,11 @@ defmodule EventStore.Storage.SubscriptionLockTest do
     last_seen
   end
 
-  defp txid_current(conn) do
-    %Postgrex.Result{rows: [[txid]]} = Postgrex.query!(conn, "SELECT txid_current()", [])
-
-    txid
+  defp drain_backend_xids(acc \\ []) do
+    receive do
+      {:backend_xid, xid} -> drain_backend_xids([xid | acc])
+    after
+      0 -> acc
+    end
   end
 end

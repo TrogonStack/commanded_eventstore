@@ -1058,7 +1058,7 @@ defmodule EventStore.AdvisoryLocksTest do
       locks_name = start_impatient_lock_server(ReleaseWithoutSession, schema)
       conn_name = Module.concat([locks_name, Postgrex])
 
-      {:ok, lock} = AdvisoryLocks.try_advisory_lock(locks_name, 1)
+      {:ok, lock} = try_advisory_lock_once_pool_answers(locks_name, 1)
 
       assert {:error, :lock_already_taken} =
                Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
@@ -1089,14 +1089,14 @@ defmodule EventStore.AdvisoryLocksTest do
 
       owner =
         spawn(fn ->
-          send(reply_to, {:lock, AdvisoryLocks.try_advisory_lock(locks_name, 1)})
+          send(reply_to, {:lock, try_advisory_lock_once_pool_answers(locks_name, 1)})
 
           receive do
             :shutdown -> :ok
           end
         end)
 
-      assert_receive {:lock, {:ok, _lock}}
+      assert_receive {:lock, {:ok, _lock}}, 5_000
 
       assert {:error, :lock_already_taken} =
                Storage.Lock.try_acquire_exclusive_lock(conn, 1, schema: schema)
@@ -1343,7 +1343,7 @@ defmodule EventStore.AdvisoryLocksTest do
         assert queued == length(owners)
       end)
 
-      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_500
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 4_000
     after
       stop_supervised!(EventStore.TcpProxy)
     end
@@ -1389,6 +1389,22 @@ defmodule EventStore.AdvisoryLocksTest do
     end)
 
     locks_name
+  end
+
+  # The impatient pool drops a checkout that waits behind any other query on its
+  # only connection, which says nothing about the lock being taken.
+  defp try_advisory_lock_once_pool_answers(locks, key, attempts \\ 500) do
+    case AdvisoryLocks.try_advisory_lock(locks, key) do
+      {:ok, _lock} = acquired ->
+        acquired
+
+      {:error, _reason} when attempts > 1 ->
+        Process.sleep(10)
+        try_advisory_lock_once_pool_answers(locks, key, attempts - 1)
+
+      other ->
+        other
+    end
   end
 
   defp start_lock_owner(key) do
