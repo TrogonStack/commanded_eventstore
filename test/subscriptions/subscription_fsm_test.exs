@@ -3,7 +3,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
   alias EventStore.{EventFactory, Storage, UUID}
   alias EventStore.Storage.Lock
-  alias EventStore.Subscriptions.{SubscriptionFsm, SubscriptionState}
+  alias EventStore.Subscriptions.{Subscription, SubscriptionFsm, SubscriptionState}
 
   # The states that own a stored position, and those that do not.
   @persisting_states [:request_catch_up, :catching_up, :subscribed, :max_capacity]
@@ -43,6 +43,18 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       fsm = fsm(context, checkpoints_pending: 1, last_ack: 3)
 
       assert {:ok, %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}}} =
+               SubscriptionFsm.delete(fsm)
+    end
+
+    test "leaves nothing unwritten after a failed checkpoint", context do
+      fsm = fsm(context, checkpoints_pending: 1, last_ack: 3, schema: "no_such_schema")
+
+      %SubscriptionFsm{data: %SubscriptionState{checkpoint_unwritten: true} = data} =
+        SubscriptionFsm.checkpoint(fsm)
+
+      fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+
+      assert {:ok, %SubscriptionFsm{data: %SubscriptionState{checkpoint_unwritten: false}}} =
                SubscriptionFsm.delete(fsm)
     end
 
@@ -224,8 +236,9 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
-               SubscriptionFsm.checkpoint(fsm)
+      assert %SubscriptionFsm{
+               data: %SubscriptionState{checkpoints_pending: 0, checkpoint_unwritten: false}
+             } = SubscriptionFsm.checkpoint(fsm)
 
       assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
     end
@@ -243,7 +256,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         SubscriptionFsm.checkpoint(fsm)
 
       assert is_reference(timer)
-      assert Process.read_timer(timer) in 1..30_000
+      assert Process.read_timer(timer) in 25_000..30_000
     end
 
     test "retries a failed write after the retry interval when it writes on every ack", context do
@@ -259,7 +272,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         SubscriptionFsm.checkpoint(fsm)
 
       assert is_reference(timer)
-      assert Process.read_timer(timer) in 30_001..45_000
+      assert Process.read_timer(timer) in 40_000..45_000
     end
 
     test "writes the position when the retry timer fires after the checkpoint interval",
@@ -278,8 +291,12 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
-               SubscriptionFsm.checkpoint(fsm)
+      assert {:noreply,
+              %Subscription{
+                subscription: %SubscriptionFsm{
+                  data: %SubscriptionState{checkpoints_pending: 0, checkpoint_unwritten: false}
+                }
+              }} = Subscription.handle_info(:checkpoint, %Subscription{subscription: fsm})
 
       assert {:ok, %Storage.Subscription{last_seen: 3}} = read_subscription(context)
     end
@@ -437,25 +454,37 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     end
 
     test "waits for another threshold of acks before writing again", context do
-      fsm = in_flight_fsm(context, 8, checkpoint_threshold: 5, schema: "no_such_schema")
+      fsm = in_flight_fsm(context, 10, checkpoint_threshold: 5, schema: "no_such_schema")
 
-      fsm = Enum.reduce(1..8, fsm, &SubscriptionFsm.ack(&2, &1, self()))
+      fsm = Enum.reduce(1..9, fsm, &SubscriptionFsm.ack(&2, &1, self()))
 
-      assert %SubscriptionFsm{} = fsm
+      assert_received :checkpoint_attempt
+      refute_received :checkpoint_attempt
+
+      assert %SubscriptionFsm{} = SubscriptionFsm.ack(fsm, 10, self())
       assert_received :checkpoint_attempt
       refute_received :checkpoint_attempt
     end
 
     test "writes the latest acknowledged position when the retry fires", context do
-      fsm = in_flight_fsm(context, 8, checkpoint_threshold: 5, schema: "no_such_schema")
+      fsm =
+        in_flight_fsm(context, 8,
+          checkpoint_threshold: 5,
+          checkpoint_after: 20,
+          schema: "no_such_schema"
+        )
 
       %SubscriptionFsm{data: %SubscriptionState{} = data} =
         fsm = Enum.reduce(1..8, fsm, &SubscriptionFsm.ack(&2, &1, self()))
 
+      assert_receive :checkpoint, 1_000
+
       fsm = %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
 
-      assert %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}} =
-               SubscriptionFsm.checkpoint(fsm)
+      assert {:noreply,
+              %Subscription{
+                subscription: %SubscriptionFsm{data: %SubscriptionState{checkpoints_pending: 0}}
+              }} = Subscription.handle_info(:checkpoint, %Subscription{subscription: fsm})
 
       assert {:ok, %Storage.Subscription{last_seen: 8}} = read_subscription(context)
     end

@@ -4,6 +4,7 @@ defmodule EventStore.Notifications.ListenerTest do
   @moduletag :capture_log
 
   alias EventStore.{EventFactory, PubSub, Wait}
+  alias EventStore.Notifications.Listener
 
   @listener TestEventStore.EventStore.Notifications.Listener
   @listen_to TestEventStore.Postgrex.Notifications
@@ -49,6 +50,43 @@ defmodule EventStore.Notifications.ListenerTest do
       assert_receive {:events, events}, 5_000
       assert length(events) == 3
       assert Process.alive?(listener)
+    end
+  end
+
+  describe "start" do
+    test "catches subscriptions up when the connection it listens on is already listening" do
+      event_store = __MODULE__.CaughtUpStore
+      registry = Module.concat([event_store, EventStore.Subscriptions.Registry])
+
+      start_supervised!({Registry, keys: :unique, name: registry})
+      {:ok, _owner} = Registry.register(registry, "subscription", nil)
+
+      assert {:ok, _ref} = Postgrex.Notifications.listen(@listen_to, "listener_test_probe")
+
+      start_supervised!(
+        {Listener,
+         event_store: event_store, listen_to: @listen_to, query_timeout: 5_000, schema: "public"}
+      )
+
+      assert_receive {:"$gen_cast", :catch_up}
+    end
+  end
+
+  describe "connecting" do
+    test "runs a one argument :configure function with the connection options" do
+      assert [host: "configured"] =
+               Listener.connecting([host: "original"], make_ref(), fn opts ->
+                 Keyword.put(opts, :host, "configured")
+               end)
+    end
+
+    test "applies a :configure function given as module, function and arguments" do
+      assert [extra: 1, host: "original"] =
+               Listener.connecting([host: "original"], make_ref(), {Keyword, :put, [:extra, 1]})
+    end
+
+    test "keeps the connection options when there is no :configure" do
+      assert [host: "original"] = Listener.connecting([host: "original"], make_ref(), nil)
     end
   end
 

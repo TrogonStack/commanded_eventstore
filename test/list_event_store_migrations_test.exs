@@ -81,12 +81,19 @@ defmodule EventStore.ListEventStoreMigrationsTest do
       {:ok, conn} = Postgrex.start_link(config)
       Postgrex.query!(conn, "DROP TABLE fork_schema_migrations", [])
       Postgrex.query!(conn, "ALTER TABLE subscriptions DROP COLUMN lock_generation", [])
+
+      Postgrex.query!(
+        conn,
+        "INSERT INTO schema_migrations (major_version, minor_version, patch_version) VALUES (1, 5, 0)",
+        []
+      )
+
       :ok = GenServer.stop(conn)
 
-      states = capture_io(fn -> send(self(), EventStore.Tasks.Migrations.exec(config)) end)
+      output = list_migrations(config, eventstore: TestEventStore)
 
-      assert_received states when is_list(states)
-      assert :pending in states
+      assert output =~ ~r/1\.5\.0\s+\tcompleted/
+      assert output =~ ~r/subscription_lock_generation\s*\tpending/
     end
   end
 
@@ -106,6 +113,24 @@ defmodule EventStore.ListEventStoreMigrationsTest do
       assert output =~ ~r/0\.17\.0\s+\tcompleted/
       assert output =~ ~r/1\.3\.2\s+\tpending/
       assert output =~ ~r/subscription_lock_generation\s*\tpending/
+    end
+  end
+
+  describe "event store in its own schema beside one without the lock generation" do
+    test "lists the lock generation migration of its own schema as completed", %{config: config} do
+      create_new_database(config)
+
+      {:ok, conn} = Postgrex.start_link(config)
+      Postgrex.query!(conn, ~s(ALTER SCHEMA public RENAME TO "example"), [])
+      Postgrex.query!(conn, "CREATE SCHEMA public", [])
+      EventStore.Storage.Initializer.run!(conn, config)
+      Postgrex.query!(conn, "DELETE FROM public.fork_schema_migrations", [])
+      :ok = GenServer.stop(conn)
+
+      output =
+        list_migrations(Keyword.put(config, :schema, "example"), eventstore: TestEventStore)
+
+      assert output =~ ~r/subscription_lock_generation\s*\tcompleted/
     end
   end
 

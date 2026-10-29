@@ -80,6 +80,7 @@ defmodule EventStore.MigrateEventStoreTest do
 
       public_history = migration_history(config, "public")
       public_structure = table_structure(config, "public")
+      public_objects = schema_objects(config, "public")
 
       migrate_eventstore(Keyword.put(config, :schema, "example"), quiet: true, is_mix: false)
 
@@ -87,6 +88,7 @@ defmodule EventStore.MigrateEventStoreTest do
       assert "1.3.2" == latest_version(config, "example")
       assert public_history == migration_history(config, "public")
       assert public_structure == table_structure(config, "public")
+      assert public_objects == schema_objects(config, "public")
     end
   end
 
@@ -244,6 +246,50 @@ defmodule EventStore.MigrateEventStoreTest do
         )
 
       rows
+    end)
+  end
+
+  defp schema_objects(config, schema) do
+    with_conn(config, fn conn ->
+      queries = [
+        "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = $1 ORDER BY 1, 2",
+        """
+        SELECT cls.relname, con.conname, pg_get_constraintdef(con.oid)
+        FROM pg_constraint con
+        JOIN pg_class cls ON cls.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE ns.nspname = $1
+        ORDER BY 1, 2
+        """,
+        """
+        SELECT cls.relname, trg.tgname
+        FROM pg_trigger trg
+        JOIN pg_class cls ON cls.oid = trg.tgrelid
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE ns.nspname = $1 AND NOT trg.tgisinternal
+        ORDER BY 1, 2
+        """,
+        """
+        SELECT proc.proname, pg_get_functiondef(proc.oid)
+        FROM pg_proc proc
+        JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+        WHERE ns.nspname = $1
+        ORDER BY 1
+        """,
+        """
+        SELECT cls.relname, cls.relkind
+        FROM pg_class cls
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE ns.nspname = $1
+        ORDER BY 1
+        """
+      ]
+
+      for query <- queries do
+        %Postgrex.Result{rows: rows} = Postgrex.query!(conn, query, [schema])
+
+        rows
+      end
     end)
   end
 

@@ -176,10 +176,59 @@ defmodule EventStore.Storage.SubscriptionLockTest do
                timeout: 6_000
              )
 
-    assert System.monotonic_time(:millisecond) - started_at < 2_000
+    assert System.monotonic_time(:millisecond) - started_at < 1_000
 
     send(holder.pid, :release)
     assert {:ok, :ok} = Task.await(holder)
+  end
+
+  test "a claim waits for half of its timeout on a locked subscription row", context do
+    %{postgrex_config: postgrex_config, conn: conn, schema: schema} = context
+    %{subscription_id: subscription_id} = create_subscription(context)
+
+    claiming_conn =
+      start_supervised!({Postgrex, Keyword.merge(postgrex_config, pool_size: 1)},
+        id: :claiming_conn
+      )
+
+    test_pid = self()
+
+    holder =
+      Task.async(fn ->
+        Postgrex.transaction(conn, fn holder_conn ->
+          Postgrex.query!(
+            holder_conn,
+            "SELECT subscription_id FROM \"#{schema}\".subscriptions WHERE subscription_id = $1 FOR UPDATE",
+            [subscription_id]
+          )
+
+          send(test_pid, :row_locked)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :row_locked
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} =
+             Lock.claim_subscription_lock(claiming_conn, subscription_id,
+               schema: schema,
+               timeout: 5_000
+             )
+
+    assert System.monotonic_time(:millisecond) - started_at >= 2_300
+
+    send(holder.pid, :release)
+    assert {:ok, :ok} = Task.await(holder)
+  end
+
+  test "a claim returns the error of a statement that cannot take the lock", %{conn: conn} do
+    assert {:error, %Postgrex.Error{}} =
+             Lock.claim_subscription_lock(conn, 1, schema: "schema_that_does_not_exist")
   end
 
   test "a claim that loses does not wait on the row of the subscription", context do

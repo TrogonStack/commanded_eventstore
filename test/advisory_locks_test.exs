@@ -782,6 +782,27 @@ defmodule EventStore.AdvisoryLocksTest do
       assert {:error, _error} = AdvisoryLocks.try_advisory_lock(@locks, 1, 1_000)
     end
 
+    test "should stop retrying verification when the lock pool goes down" do
+      {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+
+      Postgrex.query!(@conn, "BEGIN", [])
+      assert {:error, _error} = Postgrex.query(@conn, "SELECT 1 / 0", [])
+
+      send(@locks, {:connected, lock_connection})
+
+      assert %{verify_timer: timer, ref: ref} = :sys.get_state(@locks)
+      assert is_reference(timer)
+
+      send(@locks, {:DOWN, ref, :process, self(), :killed})
+
+      assert %{verify_timer: nil} = :sys.get_state(@locks)
+      assert Process.read_timer(timer) == false
+
+      Postgrex.query!(@conn, "ROLLBACK", [])
+    end
+
     test "should keep running when the lock pool monitor does not answer" do
       locks = Process.whereis(@locks)
 
@@ -794,6 +815,88 @@ defmodule EventStore.AdvisoryLocksTest do
       end
 
       assert Process.whereis(@locks) == locks
+    end
+  end
+
+  describe "session lost notice" do
+    test "should send `lock_released` message before answering a call queued ahead of the notice" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+      send(@locks, {:connected, lock_connection})
+      assert %{connection: %{pid: ^lock_connection}} = :sys.get_state(@locks)
+
+      locks = Process.whereis(@locks)
+      test_process = self()
+
+      :ok = :sys.suspend(locks)
+      :erlang.trace(locks, true, [:send])
+
+      try do
+        caller =
+          spawn(fn ->
+            send(test_process, {:reply, AdvisoryLocks.try_advisory_lock(@locks, 2)})
+
+            Process.sleep(:infinity)
+          end)
+
+        Wait.until(fn ->
+          {:messages, messages} = Process.info(locks, :messages)
+
+          assert Enum.any?(messages, &match?({:"$gen_call", {^caller, _}, _request}, &1))
+        end)
+
+        send(@locks, {AdvisoryLocks, :session_lost, lock_connection})
+
+        :ok = :sys.resume(locks)
+
+        assert_receive {:reply, {:ok, _ref}}, 5_000
+
+        sent =
+          for {:trace, ^locks, :send, message, to} <- drain_trace() do
+            case {to, message} do
+              {^test_process, {AdvisoryLocks, :lock_released, ^lock, _reason}} -> :lock_released
+              {_caller_alias, {_tag, {:ok, _ref}}} -> :reply
+              _other -> nil
+            end
+          end
+
+        assert Enum.reject(sent, &is_nil/1) == [:lock_released, :reply]
+      after
+        :erlang.trace(locks, false, [:send])
+      end
+    end
+
+    test "should handle the notice that follows a failed query ahead of a reconnect queued before it" do
+      {:ok, lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+      send(@locks, {:connected, lock_connection})
+      assert %{connection: %{pid: ^lock_connection}} = :sys.get_state(@locks)
+
+      locks = Process.whereis(@locks)
+
+      :ok = :sys.suspend(locks)
+
+      send(@locks, {AdvisoryLocks, :query_disconnected})
+      send(@locks, {:connected, lock_connection})
+      send(@locks, {AdvisoryLocks, :session_lost, lock_connection})
+
+      :ok = :sys.resume(locks)
+
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 5_000
+      assert %{lost_connection: nil} = :sys.get_state(@locks)
+    end
+
+    test "should stop waiting for a notice that never arrives" do
+      {:ok, _lock} = AdvisoryLocks.try_advisory_lock(@locks, 1)
+
+      lock_connection = lock_connection_pid()
+      send(@locks, {:connected, lock_connection})
+
+      send(@locks, {AdvisoryLocks, :query_disconnected})
+
+      assert %{connection: %{pid: ^lock_connection}} = :sys.get_state(@locks, 3_000)
     end
   end
 
@@ -1577,6 +1680,15 @@ defmodule EventStore.AdvisoryLocksTest do
   end
 
   defp lock_pool_pid, do: Process.whereis(@conn)
+
+  defp drain_trace(messages \\ []) do
+    receive do
+      {:trace, _pid, _event, _message} = trace -> drain_trace([trace | messages])
+      {:trace, _pid, _event, _message, _to} = trace -> drain_trace([trace | messages])
+    after
+      0 -> Enum.reverse(messages)
+    end
+  end
 
   defp create_subscription(%{conn: conn, schema: schema}, name \\ "test_subscription") do
     {:ok, %Storage.Subscription{} = subscription} =
