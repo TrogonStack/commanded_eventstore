@@ -142,6 +142,12 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
   def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
+  def retry_catch_up(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
+    catch_up_from_stream(fsm, data)
+  end
+
+  def retry_catch_up(%__MODULE__{} = fsm), do: fsm
+
   def ack(
         %__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm,
         ack,
@@ -497,6 +503,13 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       {:error, :stream_not_found} ->
         # Allow subscriptions to streams which don't yet exist, but might be created later
         %__MODULE__{fsm | state: :subscribed, data: data}
+
+      {:error, _error} ->
+        # A failed read says nothing about the stream, so wait out the retry interval and read again
+        %SubscriptionState{retry_interval: retry_interval} = data
+        Process.send_after(self(), :retry_catch_up, retry_interval)
+
+        %__MODULE__{fsm | state: :catching_up, data: data}
     end
   end
 

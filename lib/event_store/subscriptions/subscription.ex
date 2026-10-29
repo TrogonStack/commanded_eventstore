@@ -236,6 +236,18 @@ defmodule EventStore.Subscriptions.Subscription do
   end
 
   @impl GenServer
+  def handle_info(:retry_catch_up, %Subscription{} = state) do
+    %Subscription{subscription: subscription} = state
+
+    state =
+      subscription
+      |> SubscriptionFsm.retry_catch_up()
+      |> apply_subscription_to_state(state)
+
+    {:noreply, state}
+  end
+
+  @impl GenServer
   def handle_cast(:catch_up, %Subscription{} = state) do
     %Subscription{subscription: subscription} = state
 
