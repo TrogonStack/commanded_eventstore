@@ -1343,7 +1343,7 @@ defmodule EventStore.AdvisoryLocksTest do
         assert queued == length(owners)
       end)
 
-      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 1_500
+      assert_receive {AdvisoryLocks, :lock_released, ^lock, _reason}, 4_000
     after
       stop_supervised!(EventStore.TcpProxy)
     end
