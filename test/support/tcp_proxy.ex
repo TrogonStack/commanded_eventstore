@@ -5,7 +5,9 @@ defmodule EventStore.TcpProxy do
 
   @grace 500
 
-  def start_link(upstream), do: GenServer.start_link(__MODULE__, upstream)
+  def start_link({host, port}), do: start_link({host, port, []})
+
+  def start_link({_host, _port, _opts} = upstream), do: GenServer.start_link(__MODULE__, upstream)
 
   def port(proxy), do: GenServer.call(proxy, :port)
 
@@ -41,12 +43,25 @@ defmodule EventStore.TcpProxy do
   """
   def severed(proxy), do: GenServer.call(proxy, :severed)
 
+  @doc """
+  Lets the acceptor of a proxy started with `hold_accepts: true` take
+  connections off the listen queue, so until then the queue alone has to
+  absorb a burst.
+  """
+  def release_accepts(proxy), do: GenServer.call(proxy, :release_accepts)
+
   def stop(proxy), do: GenServer.stop(proxy)
 
   @impl GenServer
-  def init({host, port}) do
+  def init({host, port, opts}) do
     {:ok, listen} =
-      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+      :gen_tcp.listen(0, [
+        :binary,
+        active: false,
+        reuseaddr: true,
+        backlog: 1024,
+        ip: {127, 0, 0, 1}
+      ])
 
     {:ok, listen_port} = :inet.port(listen)
     proxy = self()
@@ -66,7 +81,9 @@ defmodule EventStore.TcpProxy do
        held: [],
        relays: [],
        severing: MapSet.new(),
-       severed: 0
+       severed: 0,
+       gated: Keyword.get(opts, :hold_accepts, false),
+       waiting: []
      }}
   end
 
@@ -87,6 +104,16 @@ defmodule EventStore.TcpProxy do
     do: {:reply, :ok, %{state | mode: :blackhole, severing: MapSet.new(state.relays)}}
 
   def handle_call(:severed, _from, state), do: {:reply, state.severed, state}
+
+  def handle_call(:release_accepts, _from, state) do
+    Enum.each(state.waiting, &GenServer.reply(&1, :ok))
+    {:reply, :ok, %{state | gated: false, waiting: []}}
+  end
+
+  def handle_call(:await_accepts, from, %{gated: true} = state),
+    do: {:noreply, %{state | waiting: [from | state.waiting]}}
+
+  def handle_call(:await_accepts, _from, state), do: {:reply, :ok, state}
   def handle_call(:blackhole, _from, state), do: {:reply, :ok, %{state | mode: :blackhole}}
 
   def handle_call({:hold, client}, _from, state),
@@ -113,6 +140,8 @@ defmodule EventStore.TcpProxy do
   end
 
   defp accept(listen, proxy, host, port) do
+    :ok = GenServer.call(proxy, :await_accepts, :infinity)
+
     case :gen_tcp.accept(listen) do
       {:ok, client} ->
         case GenServer.call(proxy, :mode) do
