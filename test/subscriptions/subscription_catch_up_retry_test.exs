@@ -8,7 +8,7 @@ defmodule EventStore.Subscriptions.SubscriptionCatchUpRetryTest do
     stream_uuid = UUID.uuid4()
 
     {:ok, subscription} =
-      TestEventStore.subscribe_to_all_streams(UUID.uuid4(), self(),
+      TestEventStore.subscribe_to_stream(stream_uuid, UUID.uuid4(), self(),
         buffer_size: 10,
         retry_interval: 20
       )
