@@ -1,5 +1,64 @@
 # Changelog
 
+## [1.5.0](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.9...v1.5.0) (2026-10-29)
+
+
+### Features
+
+* **config:** Allow tuning pool pings, checkout retries and connection recycling ([#22](https://github.com/TrogonStack/commanded_eventstore/issues/22)) ([19072b4](https://github.com/TrogonStack/commanded_eventstore/commit/19072b4aec0da2eb6e1463f94ef3b9d1f3b427f9))
+* **subscriptions:** Let operators tell which subscription a process serves in Observer and crash reports ([#95](https://github.com/TrogonStack/commanded_eventstore/issues/95)) ([c51477a](https://github.com/TrogonStack/commanded_eventstore/commit/c51477a05af7e3ebd5ff9bbf8ad0677c8f615ef1))
+
+
+### Bug Fixes
+
+* **config:** Make configured checkout retries apply to the queries they are meant to retry ([#58](https://github.com/TrogonStack/commanded_eventstore/issues/58)) ([eac69f8](https://github.com/TrogonStack/commanded_eventstore/commit/eac69f8658bd0b6ec399a2be0c4606fa6f440400))
+* **migrations:** Add the lock generation even when upstream already recorded 1.5.0 ([#75](https://github.com/TrogonStack/commanded_eventstore/issues/75)) ([1450b5b](https://github.com/TrogonStack/commanded_eventstore/commit/1450b5b13da50c72751078f3421f3c849160dc8a))
+* **migrations:** Keep the fork's migrations out of upstream's schema versions ([#89](https://github.com/TrogonStack/commanded_eventstore/issues/89)) ([ec067f3](https://github.com/TrogonStack/commanded_eventstore/commit/ec067f333ac4e07ed4c06ac2e56406a84ec34a12))
+* **notifications:** Keep the listener from dropping notifications that arrive while a fast keepalive ping is in flight ([#105](https://github.com/TrogonStack/commanded_eventstore/issues/105)) ([bbc70c4](https://github.com/TrogonStack/commanded_eventstore/commit/bbc70c46db7cd78974dafc119529f05c7a3351fb))
+* **streams:** Raise a meaningful error when a lazy stream read fails ([#76](https://github.com/TrogonStack/commanded_eventstore/issues/76)) ([788a578](https://github.com/TrogonStack/commanded_eventstore/commit/788a578fca7a56be43420f7f05a3ca35b01f1dc2))
+* **subscriptions:** Keep a checkpoint that failed to write so the next one retries it ([#71](https://github.com/TrogonStack/commanded_eventstore/issues/71)) ([6fceaef](https://github.com/TrogonStack/commanded_eventstore/commit/6fceaef3e6757709fbbfe0c0f77f2f69fc6b2adc))
+* **subscriptions:** Keep a failed repeated claim from giving up a lock the owner still holds ([#60](https://github.com/TrogonStack/commanded_eventstore/issues/60)) ([46533ec](https://github.com/TrogonStack/commanded_eventstore/commit/46533ec196ab05312b461c7e06026bb587f99e26))
+* **subscriptions:** Keep a long table lock on subscriptions from dropping every lock on the node ([#59](https://github.com/TrogonStack/commanded_eventstore/issues/59)) ([6ed3bf2](https://github.com/TrogonStack/commanded_eventstore/commit/6ed3bf249544cadc14a5a23a56dae3135685ceb5))
+* **subscriptions:** Keep a subscription alive and reading when a read fails while catching up ([#109](https://github.com/TrogonStack/commanded_eventstore/issues/109)) ([e902836](https://github.com/TrogonStack/commanded_eventstore/commit/e902836abe1fdce159a66879176babf40ca222e6))
+* **subscriptions:** Keep retrying the unlock of a lock whose owner exited while the connection could not answer ([#61](https://github.com/TrogonStack/commanded_eventstore/issues/61)) ([17258ae](https://github.com/TrogonStack/commanded_eventstore/commit/17258ae3b27c3709edd0b77fdfbb254430cd10b3))
+* **subscriptions:** Make caught up subscriptions read events appended while the notification connection was not listening ([#82](https://github.com/TrogonStack/commanded_eventstore/issues/82)) ([d3d3ec0](https://github.com/TrogonStack/commanded_eventstore/commit/d3d3ec05da1d7fc1fedd132c07acf61069703726))
+* **subscriptions:** Release advisory locks when the lock connection reconnects on a new session ([#24](https://github.com/TrogonStack/commanded_eventstore/issues/24)) ([a0df6c4](https://github.com/TrogonStack/commanded_eventstore/commit/a0df6c43e353c410b5522dbcb510c73fbe7dee55))
+* **subscriptions:** Report an unmigrated schema or missing grants from a node that loses every claim, and point upgraders to guides/Upgrades.md ([#110](https://github.com/TrogonStack/commanded_eventstore/issues/110)) ([c3b2fbf](https://github.com/TrogonStack/commanded_eventstore/commit/c3b2fbfdf2532ccdf2dc1e1c59918d5441161be3))
+* **subscriptions:** Stop a checkpoint racing a delete from bringing the deleted subscription back ([#69](https://github.com/TrogonStack/commanded_eventstore/issues/69)) ([65993e2](https://github.com/TrogonStack/commanded_eventstore/commit/65993e2fb729b71aefd54a5c99349ad2b5e9d522))
+* **subscriptions:** Stop a losing claim from writing the subscription row ([#90](https://github.com/TrogonStack/commanded_eventstore/issues/90)) ([3fa3533](https://github.com/TrogonStack/commanded_eventstore/commit/3fa3533896afcdf1d6746d8497401bbd6e9ef9a0))
+* **subscriptions:** Stop a stale verification retry from polling alongside the pending one ([#67](https://github.com/TrogonStack/commanded_eventstore/issues/67)) ([959e09d](https://github.com/TrogonStack/commanded_eventstore/commit/959e09da2a9dd01cd9ebfc1e47eccdfcb1127ab5))
+* **subscriptions:** Stop an acknowledgement from before a disconnect covering events the subscriber has not processed ([#72](https://github.com/TrogonStack/commanded_eventstore/issues/72)) ([7964d47](https://github.com/TrogonStack/commanded_eventstore/commit/7964d4708ab0b5b638459077d695f572a6dca0cd))
+* **subscriptions:** Stop events heard while disconnected from multiplying retries against the database ([#70](https://github.com/TrogonStack/commanded_eventstore/issues/70)) ([383d9df](https://github.com/TrogonStack/commanded_eventstore/commit/383d9df63aa8a3542cef0cc90424881313f6f98e))
+* **subscriptions:** Stop lock queries from waiting forever on a lock pool that went down ([#25](https://github.com/TrogonStack/commanded_eventstore/issues/25)) ([51b9550](https://github.com/TrogonStack/commanded_eventstore/commit/51b955026fd47a21d53dff9f57c78ae5417d5d13))
+* **subscriptions:** Stop retrying a failed checkpoint write on every ack ([#91](https://github.com/TrogonStack/commanded_eventstore/issues/91)) ([74f5783](https://github.com/TrogonStack/commanded_eventstore/commit/74f578300c22e7a4baa15bfd9fd7b7e1ae1c45b3))
+* **subscriptions:** Tell lock owners their lock is gone before the connection finishes closing ([#27](https://github.com/TrogonStack/commanded_eventstore/issues/27)) ([1f9d1f8](https://github.com/TrogonStack/commanded_eventstore/commit/1f9d1f8c291bbcca4a8171f362f7c1344753f0b0))
+* **subscriptions:** Tell lock owners their session is gone when the call that hit it replies before the connection says so ([#87](https://github.com/TrogonStack/commanded_eventstore/issues/87)) ([600edd0](https://github.com/TrogonStack/commanded_eventstore/commit/600edd06de5a8013acde32878babf7a73c1e289d))
+* **subscriptions:** Tell lock owners their session is gone without waiting for a stalled lock query to give up ([#62](https://github.com/TrogonStack/commanded_eventstore/issues/62)) ([446245b](https://github.com/TrogonStack/commanded_eventstore/commit/446245b55da19872f395589183cbd774a02e0716))
+* **subscriptions:** Tell operators why subscriptions never start on an unmigrated schema or a lock role without grants ([#49](https://github.com/TrogonStack/commanded_eventstore/issues/49)) ([92d9848](https://github.com/TrogonStack/commanded_eventstore/commit/92d984822c907285700dd2ec868c2bb5b25e1a78))
+
+
+### Miscellaneous
+
+* **advisory-locks:** Stop keeping lock state that nothing ever reads ([#68](https://github.com/TrogonStack/commanded_eventstore/issues/68)) ([5fce7ad](https://github.com/TrogonStack/commanded_eventstore/commit/5fce7adc887e8ea14a6f72567e93fc316be4d5d9))
+* **cluster:** Say server keepalives do not release a dead node's locks when PgBouncer holds the lock session ([#106](https://github.com/TrogonStack/commanded_eventstore/issues/106)) ([c66b654](https://github.com/TrogonStack/commanded_eventstore/commit/c66b654b46755818d6ef2084c5d0ebee15279ddc))
+* **test:** Catch a server restart that reuses the backend pid of the lock session ([#64](https://github.com/TrogonStack/commanded_eventstore/issues/64)) ([a7968c0](https://github.com/TrogonStack/commanded_eventstore/commit/a7968c04fae9c2b3998c03e1d591b2bc0b2f177a))
+* **test:** Catch a stale lock notice that drops the subscription's current lock ([#63](https://github.com/TrogonStack/commanded_eventstore/issues/63)) ([0802e7e](https://github.com/TrogonStack/commanded_eventstore/commit/0802e7e97f76045799f034926a51f529b5ebde8d))
+* **test:** Catch lock regressions the lock tests let through ([#92](https://github.com/TrogonStack/commanded_eventstore/issues/92)) ([884c087](https://github.com/TrogonStack/commanded_eventstore/commit/884c08790bb09e046fed2def588b3bc07f716788))
+* **test:** Catch migration regressions and make two test barriers reliable ([#94](https://github.com/TrogonStack/commanded_eventstore/issues/94)) ([2496d86](https://github.com/TrogonStack/commanded_eventstore/commit/2496d86b35ad7afc796ad9680d50f7ba61dd3c37))
+* **test:** Catch subscription regressions the suite let through ([#93](https://github.com/TrogonStack/commanded_eventstore/issues/93)) ([5f97c1a](https://github.com/TrogonStack/commanded_eventstore/commit/5f97c1a4fd48484729f873534ef9990ec8bd9b71))
+* **test:** Close the mutation and naming gaps in the test suite ([#111](https://github.com/TrogonStack/commanded_eventstore/issues/111)) ([c46b500](https://github.com/TrogonStack/commanded_eventstore/commit/c46b500c79b4553a01179c0f8cb33db2aaa7d766))
+* **test:** Give selected events time to arrive when the database is slow to acknowledge checkpoints ([#98](https://github.com/TrogonStack/commanded_eventstore/issues/98)) ([d7c41a0](https://github.com/TrogonStack/commanded_eventstore/commit/d7c41a0b6ea6ad7b035c9d18d252fcbba9ddf935))
+* **test:** Guard lock owners against losing a lock held by the connection made before the lock server started ([#65](https://github.com/TrogonStack/commanded_eventstore/issues/65)) ([92fe689](https://github.com/TrogonStack/commanded_eventstore/commit/92fe689a6f0543e84179852a4f898bfbd1d48586))
+* **test:** Guard pending unlocks against verification retries that stop or multiply ([#66](https://github.com/TrogonStack/commanded_eventstore/issues/66)) ([26a554a](https://github.com/TrogonStack/commanded_eventstore/commit/26a554aee6ce3d3cc8a407416a4a2e45162f3e7f))
+* **test:** Keep refused reconnect attempts from crashing the notification connection ([#107](https://github.com/TrogonStack/commanded_eventstore/issues/107)) ([be663f4](https://github.com/TrogonStack/commanded_eventstore/commit/be663f47ba17478760743061165f1f43f6be7769))
+* **test:** Keep the tcp proxy from resetting connections a pool opens at once ([#97](https://github.com/TrogonStack/commanded_eventstore/issues/97)) ([4185a67](https://github.com/TrogonStack/commanded_eventstore/commit/4185a67e23ea64db2be25aed9f7b5e39530cb91d))
+* **test:** Let the suite run against a database that is not on port 5432 ([#48](https://github.com/TrogonStack/commanded_eventstore/issues/48)) ([4fb5527](https://github.com/TrogonStack/commanded_eventstore/commit/4fb5527ba2b94a02ffeb684f91aa0f27725f3615))
+* **test:** Stop lingering sessions from failing the migration database reset ([#96](https://github.com/TrogonStack/commanded_eventstore/issues/96)) ([7c2d6e9](https://github.com/TrogonStack/commanded_eventstore/commit/7c2d6e9e05756de19bdbddc19043852bb0f17e4d))
+* **test:** Stop lock tests from failing without a regression ([#108](https://github.com/TrogonStack/commanded_eventstore/issues/108)) ([99a9765](https://github.com/TrogonStack/commanded_eventstore/commit/99a9765919ac906fdc02a3b611bca227a4ab27b1))
+* **test:** Stop the fencing test appending before the store listens for new events ([#77](https://github.com/TrogonStack/commanded_eventstore/issues/77)) ([a2ce825](https://github.com/TrogonStack/commanded_eventstore/commit/a2ce8259dbf4e28df892d13fc0d5e63d25c33600))
+* **test:** Stop timing bound tests failing under load ([#33](https://github.com/TrogonStack/commanded_eventstore/issues/33)) ([d1ca6d1](https://github.com/TrogonStack/commanded_eventstore/commit/d1ca6d1dc6c0af100e11e8053d78d9b87c959953))
+* **upgrades:** Say the claim error is logged once so operators know not to wait for it to repeat ([#88](https://github.com/TrogonStack/commanded_eventstore/issues/88)) ([e761761](https://github.com/TrogonStack/commanded_eventstore/commit/e761761bf1cd33e4d88fdf7919365d24d78579cc))
+
 ## [1.4.9](https://github.com/TrogonStack/commanded_eventstore/compare/v1.4.8...v1.4.9) (2026-09-24)
 
 
