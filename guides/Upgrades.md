@@ -4,7 +4,7 @@ Versions that need a schema migration are listed below. The [CHANGELOG](https://
 
 ## Upgrading to 1.5.0
 
-1.5.0 adds a `lock_generation` column to the `subscriptions` table, which fences the progress writes of a node that lost a subscription's lock. Run `mix event_store.migrate` (or `EventStore.Tasks.Migrate.exec/2` from a release) before starting any node on 1.5.0. EventStore does not migrate on start: a 1.5.0 node on an unmigrated database starts, but none of its persistent subscriptions ever subscribe, and it logs an error naming the migration once, then keeps retrying without logging again until the schema is migrated.
+1.5.0 adds a `lock_generation` column to the `subscriptions` table, which fences the progress writes of a node that lost a subscription's lock. Run `mix event_store.migrate` (or `EventStore.Tasks.Migrate.exec/2` from a release) before starting any node on 1.5.0. EventStore does not migrate on start: a 1.5.0 node on an unmigrated database starts, but none of its persistent subscriptions ever subscribe, and it logs an error naming the migration once, on its first claim attempt even when another node holds every lock, then keeps retrying without logging again until the schema is migrated.
 
 Subscription locks are now taken with an `UPDATE` on the `subscriptions` table over the session mode connection. When `session_mode_pool` (or `session_mode_url`) connects as a different role from the main pool, grant that role `SELECT` and `UPDATE` on `subscriptions` in the event store's schema:
 
@@ -12,9 +12,19 @@ Subscription locks are now taken with an `UPDATE` on the `subscriptions` table o
 GRANT SELECT, UPDATE ON "public".subscriptions TO session_mode_role;
 ```
 
-Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges once, then keeps retrying without logging again.
+Without these grants, persistent subscriptions never subscribe and the node logs an error naming the missing privileges once, on its first claim attempt even when another node holds every lock, then keeps retrying without logging again.
 
-This fork records its own migrations by name in a `fork_schema_migrations` table and leaves `schema_migrations` to upstream's versions, so a database moved back to upstream EventStore still runs every upstream migration it has not applied.
+This fork records its own migrations by name in a `fork_schema_migrations` table and leaves `schema_migrations` to upstream's versions. Once the 1.5.0 migrate has run, a database moved back to upstream EventStore still runs every upstream migration it has not applied.
+
+### Databases from unreleased builds
+
+A database that a build of `main` between commits `51b9550` and `d3d3ec0` created or migrated already has the `lock_generation` column, and its `schema_migrations` table holds a `1.5.0` row that this fork's migration has since replaced. On such a database:
+
+- 1.5.0 runs without a migrate and logs nothing, because the column it needs is there;
+- `mix event_store.migrations` lists `1.5.0` as completed and `subscription_lock_generation` as pending;
+- upstream's migrate reports the database as already migrated, so a 1.5.0 migration of upstream's own would be skipped.
+
+Run `mix event_store.migrate` on these databases as well, before moving them back to upstream. The migrate deletes the old `1.5.0` row and records `subscription_lock_generation` in `fork_schema_migrations`. When no other row is left, it records `1.3.2` instead, so the latest version in `schema_migrations` goes from `1.5.0` down to `1.3.2`, and upstream then runs the migrations it has not applied.
 
 ## Migrate before rolling nodes
 
