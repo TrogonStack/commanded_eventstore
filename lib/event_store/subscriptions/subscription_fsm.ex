@@ -140,6 +140,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %__MODULE__{fsm | state: :request_catch_up, data: data}
   end
 
+  # A catch-up request is a reason to try again now rather than wait out a failed read's retry.
+  def catch_up(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm
+      )
+      when is_reference(ref) do
+    catch_up_from_stream(fsm, cancel_retry(data))
+  end
+
   def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
   def retry_catch_up(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
@@ -318,6 +327,18 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
           %__MODULE__{fsm | state: :subscribed, data: data}
         end
     end
+  end
+
+  # New events are a reason to try again now rather than wait out a failed read's retry.
+  def notify_events(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        events
+      )
+      when is_reference(ref) do
+    data = data |> track_last_received(events) |> cancel_retry()
+
+    catch_up_from_stream(fsm, data)
   end
 
   # Ignore notify events unless subscribed
@@ -535,13 +556,19 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   end
 
   defp schedule_retry(%SubscriptionState{} = data) do
-    %SubscriptionState{retry_interval: retry_interval, retry_timer_ref: retry_timer_ref} = data
-
-    if retry_timer_ref, do: Process.cancel_timer(retry_timer_ref)
+    %SubscriptionState{retry_interval: retry_interval} = data = cancel_retry(data)
 
     retry_timer_ref = Process.send_after(self(), :retry_catch_up, retry_interval)
 
     %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
+  end
+
+  defp cancel_retry(%SubscriptionState{retry_timer_ref: nil} = data), do: data
+
+  defp cancel_retry(%SubscriptionState{retry_timer_ref: retry_timer_ref} = data) do
+    Process.cancel_timer(retry_timer_ref)
+
+    %SubscriptionState{data | retry_timer_ref: nil}
   end
 
   defp read_stream_forward(%SubscriptionState{} = data) do

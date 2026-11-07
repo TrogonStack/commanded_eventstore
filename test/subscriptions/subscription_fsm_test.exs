@@ -702,7 +702,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     |> SubscriptionFsm.catch_up()
   end
 
-  defp recover_schema(%SubscriptionFsm{data: data} = fsm, context) do
+  defp recover_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm, context) do
     %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
   end
 
