@@ -610,6 +610,44 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       refute_receive :retry_catch_up, 300
     end
 
+    test "reads again on a catch-up request instead of waiting out the retry", context do
+      failed = failed_read(context)
+
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
+
+      assert %SubscriptionFsm{state: :request_catch_up} =
+               failed |> recover_schema(context) |> SubscriptionFsm.catch_up()
+
+      assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
+    end
+
+    test "reads again on a notification of new events instead of waiting out the retry",
+         context do
+      failed = failed_read(context)
+
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
+      {:ok, events} = TestEventStore.read_stream_forward(context.stream_uuid)
+
+      assert %SubscriptionFsm{state: :request_catch_up} =
+               failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+
+      assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
+    end
+
+    test "leaves no retry pending once an early read succeeds", context do
+      failed = failed_read(context, retry_interval: 200)
+
+      failed |> recover_schema(context) |> SubscriptionFsm.catch_up()
+
+      refute_receive :retry_catch_up, 400
+    end
+
+    test "waits on in-flight events without a pending retry", context do
+      fsm = in_flight_fsm(context, 1, state: :catching_up)
+
+      assert ^fsm = SubscriptionFsm.catch_up(fsm)
+    end
+
     test "keeps a single retry pending when in-flight events are acked one by one", context do
       :ok =
         TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(10))
@@ -653,6 +691,19 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         refute_received {:events, _events}
       end
     end
+  end
+
+  defp failed_read(context, overrides \\ []) do
+    context
+    |> fsm(
+      [state: :request_catch_up, schema: "no_such_schema", checkpoint_threshold: 100] ++ overrides
+    )
+    |> SubscriptionFsm.connect_subscriber(self(), buffer_size: 10)
+    |> SubscriptionFsm.catch_up()
+  end
+
+  defp recover_schema(%SubscriptionFsm{data: data} = fsm, context) do
+    %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
   end
 
   defp in_flight_fsm(context, count, overrides) do
