@@ -561,7 +561,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       fsm = SubscriptionFsm.connect_subscriber(fsm, self(), buffer_size: 10)
 
-      %SubscriptionFsm{data: data} = failed = SubscriptionFsm.catch_up(fsm)
+      %SubscriptionFsm{data: %SubscriptionState{} = data} = failed = SubscriptionFsm.catch_up(fsm)
 
       :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
 
@@ -652,7 +652,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       :ok =
         TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(10))
 
-      %SubscriptionFsm{data: data} =
+      %SubscriptionFsm{data: %SubscriptionState{} = data} =
         context
         |> fsm(state: :request_catch_up, retry_interval: 200, checkpoint_threshold: 100)
         |> SubscriptionFsm.connect_subscriber(self(), buffer_size: 10)

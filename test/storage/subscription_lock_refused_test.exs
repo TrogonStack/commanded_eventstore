@@ -8,7 +8,14 @@ defmodule EventStore.Storage.SubscriptionLockRefusedTest do
 
   setup %{conn: conn, postgrex_config: postgrex_config} do
     drop = fn ->
-      Postgrex.query!(conn, ~s|DROP DATABASE IF EXISTS "#{@database}" WITH (FORCE)|, [])
+      # DROP DATABASE ... WITH (FORCE) needs PostgreSQL 13, so end the sessions first.
+      Postgrex.query!(
+        conn,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
+        [@database]
+      )
+
+      Postgrex.query!(conn, ~s|DROP DATABASE IF EXISTS "#{@database}"|, [])
       Postgrex.query!(conn, ~s|DROP ROLE IF EXISTS "#{@role}"|, [])
     end
 
