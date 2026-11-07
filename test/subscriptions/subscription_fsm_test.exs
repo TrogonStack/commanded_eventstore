@@ -1,6 +1,8 @@
 defmodule EventStore.Subscriptions.SubscriptionFsmTest do
   use EventStore.StorageCase
 
+  import ExUnit.CaptureLog
+
   alias EventStore.{EventFactory, Storage, UUID}
   alias EventStore.Storage.Lock
   alias EventStore.Subscriptions.{Subscription, SubscriptionFsm, SubscriptionState}
@@ -533,6 +535,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       fsm = fsm(context, state: :request_catch_up, schema: "no_such_schema")
 
       assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
+    end
+
+    test "logs why the read failed", context do
+      fsm = fsm(context, state: :request_catch_up, schema: "no_such_schema")
+
+      log = capture_log([level: :warning], fn -> SubscriptionFsm.catch_up(fsm) end)
+
+      assert log =~ "failed to catch up"
+      assert log =~ "no_such_schema"
     end
 
     test "asks to read again after the retry interval", context do
