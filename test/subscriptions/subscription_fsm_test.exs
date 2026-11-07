@@ -569,10 +569,49 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}, %{event_number: 3}]}
     end
 
-    test "ignores a retry for a subscription that is no longer waiting on one", context do
-      fsm = fsm(context, state: :subscribed)
+    test "retries a read that fails because the pool has no connection to give", context do
+      %{conn: conn} = context
+      fsm = fsm(context, state: :request_catch_up, retry_interval: 20, query_timeout: 100)
+      test_pid = self()
 
-      assert ^fsm = SubscriptionFsm.retry_catch_up(fsm)
+      holder =
+        Task.async(fn ->
+          Postgrex.transaction(conn, fn _held ->
+            send(test_pid, :connection_held)
+            receive do: (:release -> :ok)
+          end)
+        end)
+
+      assert_receive :connection_held, 5_000
+
+      assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
+      assert_receive :retry_catch_up, 1_000
+
+      send(holder.pid, :release)
+      assert {:ok, :ok} = Task.await(holder)
+    end
+
+    test "waits the retry interval before reading again", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
+
+      assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
+      refute_receive :retry_catch_up, 300
+    end
+
+    for state <- [:subscribed, :max_capacity] do
+      test "ignores a retry for a #{state} subscription even with events to read", context do
+        fsm =
+          context
+          |> fsm(state: unquote(state))
+          |> SubscriptionFsm.connect_subscriber(self(), buffer_size: 10)
+
+        :ok =
+          TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
+
+        assert ^fsm = SubscriptionFsm.retry_catch_up(fsm)
+        refute_received {:events, _events}
+      end
     end
   end
 
@@ -646,7 +685,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       checkpoint_after: Keyword.get(overrides, :checkpoint_after, 0),
       checkpoint_threshold: Keyword.get(overrides, :checkpoint_threshold, 1),
       retry_interval: Keyword.get(overrides, :retry_interval, 60_000),
-      query_timeout: 15_000,
+      query_timeout: Keyword.get(overrides, :query_timeout, 15_000),
       event_store: TestEventStore,
       serializer: context.serializer,
       correlation_id_type: context.correlation_id_type,
