@@ -519,7 +519,12 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         # Allow subscriptions to streams which don't yet exist, but might be created later
         %__MODULE__{fsm | state: :subscribed, data: data}
 
-      {:error, _error} ->
+      {:error, error} ->
+        Logger.warning(
+          describe(data) <>
+            " failed to catch up, retrying in #{data.retry_interval}ms due to: " <> inspect(error)
+        )
+
         # A failed read says nothing about the stream, so wait out the retry interval and read again
         %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data)}
     end
