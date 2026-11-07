@@ -599,6 +599,35 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       refute_receive :retry_catch_up, 300
     end
 
+    test "keeps a single retry pending when in-flight events are acked one by one", context do
+      :ok =
+        TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(10))
+
+      %SubscriptionFsm{data: data} =
+        context
+        |> fsm(state: :request_catch_up, retry_interval: 200, checkpoint_threshold: 100)
+        |> SubscriptionFsm.connect_subscriber(self(), buffer_size: 10)
+        |> SubscriptionFsm.catch_up()
+
+      assert_received {:events, events}
+      assert length(events) == 10
+
+      failed =
+        SubscriptionFsm.catch_up(%SubscriptionFsm{
+          state: :request_catch_up,
+          data: %SubscriptionState{data | schema: "no_such_schema"}
+        })
+
+      acked =
+        Enum.reduce(events, failed, fn %{event_number: event_number}, fsm ->
+          SubscriptionFsm.ack(fsm, event_number, self())
+        end)
+
+      assert %SubscriptionFsm{state: :catching_up} = acked
+      assert_receive :retry_catch_up, 1_000
+      refute_receive :retry_catch_up, 400
+    end
+
     for state <- [:subscribed, :max_capacity] do
       test "ignores a retry for a #{state} subscription even with events to read", context do
         fsm =
