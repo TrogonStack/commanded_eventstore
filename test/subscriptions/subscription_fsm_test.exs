@@ -656,6 +656,21 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       refute_receive {:timeout, _ref, :retry_catch_up}, 400
     end
 
+    test "drops the pending retry when the subscription loses its lock", context do
+      lock_ref = make_ref()
+
+      %SubscriptionFsm{data: %SubscriptionState{} = data} =
+        failed = failed_read(context, retry_interval: 200)
+
+      failed = %SubscriptionFsm{failed | data: %SubscriptionState{data | lock_ref: lock_ref}}
+
+      assert %SubscriptionFsm{state: :disconnected, data: data} =
+               SubscriptionFsm.disconnect(failed, lock_ref)
+
+      assert data.retry_timer_ref == nil
+      refute_receive {:timeout, _ref, :retry_catch_up}, 400
+    end
+
     test "waits on in-flight events without a pending retry", context do
       fsm = in_flight_fsm(context, 1, state: :catching_up)
 
