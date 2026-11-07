@@ -552,7 +552,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       SubscriptionFsm.catch_up(fsm)
 
-      assert_receive :retry_catch_up, 1_000
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
     end
 
     test "reads again and delivers events once storage recovers", context do
@@ -565,7 +565,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
 
-      assert_receive :retry_catch_up, 1_000
+      assert_receive {:timeout, ref, :retry_catch_up}, 1_000
       refute_received {:events, _events}
 
       recovered = %SubscriptionFsm{
@@ -574,7 +574,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       }
 
       assert %SubscriptionFsm{state: :request_catch_up, data: data} =
-               SubscriptionFsm.retry_catch_up(recovered)
+               SubscriptionFsm.retry_catch_up(recovered, ref)
 
       assert data.last_sent == 3
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}, %{event_number: 3}]}
@@ -596,7 +596,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_receive :connection_held, 5_000
 
       assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
-      assert_receive :retry_catch_up, 1_000
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
 
       send(holder.pid, :release)
       assert {:ok, :ok} = Task.await(holder)
@@ -607,7 +607,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
 
       assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
-      refute_receive :retry_catch_up, 300
+      refute_receive {:timeout, _ref, :retry_catch_up}, 300
     end
 
     test "reads again on a catch-up request instead of waiting out the retry", context do
@@ -639,19 +639,21 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       failed |> recover_schema(context) |> SubscriptionFsm.catch_up()
 
-      refute_receive :retry_catch_up, 400
+      refute_receive {:timeout, _ref, :retry_catch_up}, 400
     end
 
     test "ignores a retry that was already due when an early read armed the next one", context do
       failed = failed_read(context, retry_interval: 200)
 
-      assert_receive :retry_catch_up, 1_000
+      assert_receive {:timeout, stale, :retry_catch_up}, 1_000
 
       rearmed = SubscriptionFsm.catch_up(failed)
 
-      assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.retry_catch_up(rearmed)
-      assert_receive :retry_catch_up, 1_000
-      refute_receive :retry_catch_up, 400
+      assert %SubscriptionFsm{state: :catching_up} =
+               SubscriptionFsm.retry_catch_up(rearmed, stale)
+
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
+      refute_receive {:timeout, _ref, :retry_catch_up}, 400
     end
 
     test "waits on in-flight events without a pending retry", context do
@@ -685,8 +687,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         end)
 
       assert %SubscriptionFsm{state: :catching_up} = acked
-      assert_receive :retry_catch_up, 1_000
-      refute_receive :retry_catch_up, 400
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
+      refute_receive {:timeout, _ref, :retry_catch_up}, 400
     end
 
     for state <- [:subscribed, :max_capacity] do
@@ -699,7 +701,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
         :ok =
           TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
 
-        assert ^fsm = SubscriptionFsm.retry_catch_up(fsm)
+        assert ^fsm = SubscriptionFsm.retry_catch_up(fsm, make_ref())
         refute_received {:events, _events}
       end
     end

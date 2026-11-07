@@ -151,11 +151,17 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
   def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
-  def retry_catch_up(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
+  # A retry already in the mailbox when an early read armed the next one must not start a second retry.
+  def retry_catch_up(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        ref
+      )
+      when is_reference(ref) do
     catch_up_from_stream(fsm, %SubscriptionState{data | retry_timer_ref: nil})
   end
 
-  def retry_catch_up(%__MODULE__{} = fsm), do: fsm
+  def retry_catch_up(%__MODULE__{} = fsm, _ref), do: fsm
 
   def ack(
         %__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm,
@@ -558,7 +564,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   defp schedule_retry(%SubscriptionState{} = data) do
     %SubscriptionState{retry_interval: retry_interval} = data = cancel_retry(data)
 
-    retry_timer_ref = Process.send_after(self(), :retry_catch_up, retry_interval)
+    retry_timer_ref = :erlang.start_timer(retry_interval, self(), :retry_catch_up)
 
     %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
   end
