@@ -377,6 +377,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       %SubscriptionState{data | lock_ref: nil, fencing_token: nil}
       |> SubscriptionState.reset_event_tracking()
       |> purge_in_flight_events()
+      # A retry left over from before the lock was lost would hold back acks after reconnecting.
+      |> cancel_retry()
 
     %__MODULE__{fsm | state: :disconnected, data: data}
   end
