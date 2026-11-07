@@ -15,6 +15,9 @@ defmodule EventStore.Storage.SubscriptionLockRefusedTest do
         [@database]
       )
 
+      # Sessions end asynchronously and the drop waits only five seconds for them.
+      await_no_sessions(conn, 100)
+
       Postgrex.query!(conn, ~s|DROP DATABASE IF EXISTS "#{@database}"|, [])
       Postgrex.query!(conn, ~s|DROP ROLE IF EXISTS "#{@role}"|, [])
     end
@@ -56,5 +59,24 @@ defmodule EventStore.Storage.SubscriptionLockRefusedTest do
              Lock.claim_subscription_lock(context.role_conn, 1, schema: "public")
 
     assert postgres.message =~ "pg_try_advisory_xact_lock"
+  end
+
+  defp await_no_sessions(conn, attempts) do
+    %Postgrex.Result{rows: [[sessions]]} =
+      Postgrex.query!(conn, "SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [
+        @database
+      ])
+
+    cond do
+      sessions == 0 ->
+        :ok
+
+      attempts > 0 ->
+        Process.sleep(100)
+        await_no_sessions(conn, attempts - 1)
+
+      true ->
+        flunk("#{sessions} sessions on #{@database} did not end")
+    end
   end
 end
