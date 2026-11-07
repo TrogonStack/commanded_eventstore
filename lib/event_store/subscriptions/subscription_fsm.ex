@@ -140,13 +140,28 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %__MODULE__{fsm | state: :request_catch_up, data: data}
   end
 
-  def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
-
-  def retry_catch_up(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
-    catch_up_from_stream(fsm, data)
+  # A catch-up request is a reason to try again now rather than wait out a failed read's retry.
+  def catch_up(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm
+      )
+      when is_reference(ref) do
+    catch_up_from_stream(fsm, cancel_retry(data))
   end
 
-  def retry_catch_up(%__MODULE__{} = fsm), do: fsm
+  def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
+
+  # A retry already in the mailbox when an early read armed the next one must not start a second retry.
+  def retry_catch_up(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        ref
+      )
+      when is_reference(ref) do
+    catch_up_from_stream(fsm, %SubscriptionState{data | retry_timer_ref: nil})
+  end
+
+  def retry_catch_up(%__MODULE__{} = fsm, _ref), do: fsm
 
   def ack(
         %__MODULE__{state: :request_catch_up, data: %SubscriptionState{} = data} = fsm,
@@ -155,6 +170,21 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       ) do
     with {:ok, data} <- ack_events(data, ack, subscriber) do
       catch_up_from_stream(fsm, data)
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  # A failed read already has a retry pending, so an ack must not start another one.
+  def ack(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        ack,
+        subscriber
+      )
+      when is_reference(ref) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      %__MODULE__{fsm | state: :catching_up, data: data}
     else
       reply -> {reply, fsm}
     end
@@ -305,6 +335,18 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     end
   end
 
+  # New events are a reason to try again now rather than wait out a failed read's retry.
+  def notify_events(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        events
+      )
+      when is_reference(ref) do
+    data = data |> track_last_received(events) |> cancel_retry()
+
+    catch_up_from_stream(fsm, data)
+  end
+
   # Ignore notify events unless subscribed
   def notify_events(%__MODULE__{data: %SubscriptionState{} = data} = fsm, events) do
     %__MODULE__{fsm | data: track_last_received(data, events)}
@@ -335,6 +377,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       %SubscriptionState{data | lock_ref: nil, fencing_token: nil}
       |> SubscriptionState.reset_event_tracking()
       |> purge_in_flight_events()
+      # A retry left over from before the lock was lost would hold back acks after reconnecting.
+      |> cancel_retry()
 
     %__MODULE__{fsm | state: :disconnected, data: data}
   end
@@ -504,17 +548,35 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         # Allow subscriptions to streams which don't yet exist, but might be created later
         %__MODULE__{fsm | state: :subscribed, data: data}
 
-      {:error, _error} ->
-        # A failed read says nothing about the stream, so wait out the retry interval and read again
-        %SubscriptionState{retry_interval: retry_interval} = data
-        Process.send_after(self(), :retry_catch_up, retry_interval)
+      {:error, error} ->
+        Logger.warning(
+          describe(data) <>
+            " failed to catch up, retrying in #{data.retry_interval}ms due to: " <> inspect(error)
+        )
 
-        %__MODULE__{fsm | state: :catching_up, data: data}
+        # A failed read says nothing about the stream, so wait out the retry interval and read again
+        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data)}
     end
   end
 
   defp catch_up_from_stream(%__MODULE__{} = fsm, %SubscriptionState{} = data) do
     %__MODULE__{fsm | state: :catching_up, data: data}
+  end
+
+  defp schedule_retry(%SubscriptionState{} = data) do
+    %SubscriptionState{retry_interval: retry_interval} = data = cancel_retry(data)
+
+    retry_timer_ref = :erlang.start_timer(retry_interval, self(), :retry_catch_up)
+
+    %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
+  end
+
+  defp cancel_retry(%SubscriptionState{retry_timer_ref: nil} = data), do: data
+
+  defp cancel_retry(%SubscriptionState{retry_timer_ref: retry_timer_ref} = data) do
+    Process.cancel_timer(retry_timer_ref)
+
+    %SubscriptionState{data | retry_timer_ref: nil}
   end
 
   defp read_stream_forward(%SubscriptionState{} = data) do

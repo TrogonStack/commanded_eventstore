@@ -1,0 +1,82 @@
+defmodule EventStore.Storage.SubscriptionLockRefusedTest do
+  use EventStore.StorageCase
+
+  alias EventStore.Storage.Lock
+
+  @database "eventstore_test_xact_lock_denied"
+  @role "eventstore_xact_lock_denied"
+
+  setup %{conn: conn, postgrex_config: postgrex_config} do
+    drop = fn ->
+      # DROP DATABASE ... WITH (FORCE) needs PostgreSQL 13, so end the sessions first.
+      Postgrex.query!(
+        conn,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
+        [@database]
+      )
+
+      # Sessions end asynchronously and the drop waits only five seconds for them.
+      await_no_sessions(conn, 100)
+
+      Postgrex.query!(conn, ~s|DROP DATABASE IF EXISTS "#{@database}"|, [])
+      Postgrex.query!(conn, ~s|DROP ROLE IF EXISTS "#{@role}"|, [])
+    end
+
+    drop.()
+    on_exit(fn -> drop.() end)
+
+    Postgrex.query!(conn, ~s|CREATE ROLE "#{@role}" LOGIN PASSWORD 'secret'|, [])
+    Postgrex.query!(conn, ~s|CREATE DATABASE "#{@database}" TEMPLATE template0|, [])
+
+    {:ok, admin} = Postgrex.start_link(Keyword.put(postgrex_config, :database, @database))
+
+    Postgrex.query!(
+      admin,
+      "CREATE TABLE public.subscriptions (subscription_id bigint PRIMARY KEY, " <>
+        "lock_generation bigint NOT NULL DEFAULT 0, last_seen bigint)",
+      []
+    )
+
+    Postgrex.query!(admin, "INSERT INTO public.subscriptions (subscription_id) VALUES (1)", [])
+    Postgrex.query!(admin, ~s|GRANT SELECT, UPDATE ON public.subscriptions TO "#{@role}"|, [])
+
+    Postgrex.query!(
+      admin,
+      "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_try_advisory_xact_lock(integer, integer) FROM PUBLIC",
+      []
+    )
+
+    GenServer.stop(admin)
+
+    role_config =
+      Keyword.merge(postgrex_config, database: @database, username: @role, password: "secret")
+
+    [role_conn: start_supervised!({Postgrex, role_config}, id: :role_conn)]
+  end
+
+  test "a claim returns the error when only the advisory lock statement is refused", context do
+    assert {:error, %Postgrex.Error{postgres: %{code: :insufficient_privilege} = postgres}} =
+             Lock.claim_subscription_lock(context.role_conn, 1, schema: "public")
+
+    assert postgres.message =~ "pg_try_advisory_xact_lock"
+  end
+
+  defp await_no_sessions(conn, attempts) do
+    %Postgrex.Result{rows: [[sessions]]} =
+      Postgrex.query!(conn, "SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [
+        @database
+      ])
+
+    cond do
+      sessions == 0 ->
+        :ok
+
+      attempts > 0 ->
+        Process.sleep(100)
+        await_no_sessions(conn, attempts - 1)
+
+      true ->
+        flunk("#{sessions} sessions on #{@database} did not end")
+    end
+  end
+end
