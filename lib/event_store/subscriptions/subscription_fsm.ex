@@ -143,7 +143,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
   def catch_up(%__MODULE__{data: %SubscriptionState{}} = fsm), do: fsm
 
   def retry_catch_up(%__MODULE__{state: :catching_up, data: %SubscriptionState{} = data} = fsm) do
-    catch_up_from_stream(fsm, data)
+    catch_up_from_stream(fsm, %SubscriptionState{data | retry_timer_ref: nil})
   end
 
   def retry_catch_up(%__MODULE__{} = fsm), do: fsm
@@ -155,6 +155,21 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       ) do
     with {:ok, data} <- ack_events(data, ack, subscriber) do
       catch_up_from_stream(fsm, data)
+    else
+      reply -> {reply, fsm}
+    end
+  end
+
+  # A failed read already has a retry pending, so an ack must not start another one.
+  def ack(
+        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
+          fsm,
+        ack,
+        subscriber
+      )
+      when is_reference(ref) do
+    with {:ok, data} <- ack_events(data, ack, subscriber) do
+      %__MODULE__{fsm | state: :catching_up, data: data}
     else
       reply -> {reply, fsm}
     end
@@ -506,15 +521,22 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
       {:error, _error} ->
         # A failed read says nothing about the stream, so wait out the retry interval and read again
-        %SubscriptionState{retry_interval: retry_interval} = data
-        Process.send_after(self(), :retry_catch_up, retry_interval)
-
-        %__MODULE__{fsm | state: :catching_up, data: data}
+        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data)}
     end
   end
 
   defp catch_up_from_stream(%__MODULE__{} = fsm, %SubscriptionState{} = data) do
     %__MODULE__{fsm | state: :catching_up, data: data}
+  end
+
+  defp schedule_retry(%SubscriptionState{} = data) do
+    %SubscriptionState{retry_interval: retry_interval, retry_timer_ref: retry_timer_ref} = data
+
+    if retry_timer_ref, do: Process.cancel_timer(retry_timer_ref)
+
+    retry_timer_ref = Process.send_after(self(), :retry_catch_up, retry_interval)
+
+    %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
   end
 
   defp read_stream_forward(%SubscriptionState{} = data) do
