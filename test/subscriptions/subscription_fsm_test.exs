@@ -642,6 +642,18 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       refute_receive :retry_catch_up, 400
     end
 
+    test "ignores a retry that was already due when an early read armed the next one", context do
+      failed = failed_read(context, retry_interval: 200)
+
+      assert_receive :retry_catch_up, 1_000
+
+      rearmed = SubscriptionFsm.catch_up(failed)
+
+      assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.retry_catch_up(rearmed)
+      assert_receive :retry_catch_up, 1_000
+      refute_receive :retry_catch_up, 400
+    end
+
     test "waits on in-flight events without a pending retry", context do
       fsm = in_flight_fsm(context, 1, state: :catching_up)
 
