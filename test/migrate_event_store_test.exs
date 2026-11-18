@@ -315,6 +315,8 @@ defmodule EventStore.MigrateEventStoreTest do
         "NOW"
       )
     )
+    # pg_dump 18 emits a per-column attribute version which differs between databases
+    |> Enum.map(&Regex.replace(~r/pg_attver=\d+/, &1, "pg_attver=N"))
     # Ignore comments and pg_dump version-specific directives with random tokens
     |> Enum.reject(&String.starts_with?(&1, "--"))
     |> Enum.reject(&String.starts_with?(&1, "\\restrict "))
