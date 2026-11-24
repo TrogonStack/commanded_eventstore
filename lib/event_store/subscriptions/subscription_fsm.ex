@@ -335,18 +335,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     end
   end
 
-  # New events are a reason to try again now rather than wait out a failed read's retry.
-  def notify_events(
-        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
-          fsm,
-        events
-      )
-      when is_reference(ref) do
-    data = data |> track_last_received(events) |> cancel_retry()
-
-    catch_up_from_stream(fsm, data)
-  end
-
+  # While a failed read has a retry pending, new events are only recorded: the retry reads them,
+  # so a busy stream cannot turn every notification into another failing read.
   # Ignore notify events unless subscribed
   def notify_events(%__MODULE__{data: %SubscriptionState{} = data} = fsm, events) do
     %__MODULE__{fsm | data: track_last_received(data, events)}
@@ -379,6 +369,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       |> purge_in_flight_events()
       # A retry left over from before the lock was lost would hold back acks after reconnecting.
       |> cancel_retry()
+      |> reset_retry_attempt()
 
     %__MODULE__{fsm | state: :disconnected, data: data}
   end
@@ -521,6 +512,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
     case read_stream_forward(data) do
       {:ok, []} ->
+        data = reset_retry_attempt(data)
+
         if last_sent == last_received do
           # Subscriber is up-to-date with latest published events
           %__MODULE__{fsm | state: :subscribed, data: data}
@@ -530,6 +523,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         end
 
       {:ok, events} ->
+        data = reset_retry_attempt(data)
+
         data = data |> enqueue_events(events) |> notify_subscribers()
 
         if empty_queue?(data) do
@@ -541,21 +536,29 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         end
 
       {:error, :stream_deleted} ->
+        data = reset_retry_attempt(data)
+
         # Don't allow subscriptions to deleted streams to receive any events
         %__MODULE__{fsm | state: :unsubscribed, data: data}
 
       {:error, :stream_not_found} ->
+        data = reset_retry_attempt(data)
+
         # Allow subscriptions to streams which don't yet exist, but might be created later
         %__MODULE__{fsm | state: :subscribed, data: data}
 
       {:error, error} ->
+        delay = retry_delay(data)
+
         Logger.warning(
           describe(data) <>
-            " failed to catch up, retrying in #{data.retry_interval}ms due to: " <> inspect(error)
+            " failed to catch up, retrying in #{delay}ms due to: " <> inspect(error)
         )
 
-        # A failed read says nothing about the stream, so wait out the retry interval and read again
-        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data)}
+        # A failed read says nothing about the stream, so read again shortly
+        data = %SubscriptionState{data | retry_attempt: data.retry_attempt + 1}
+
+        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data, delay)}
     end
   end
 
@@ -563,13 +566,23 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %__MODULE__{fsm | state: :catching_up, data: data}
   end
 
-  defp schedule_retry(%SubscriptionState{} = data) do
-    %SubscriptionState{retry_interval: retry_interval} = data = cancel_retry(data)
+  @initial_retry_delay 100
 
-    retry_timer_ref = :erlang.start_timer(retry_interval, self(), :retry_catch_up)
+  defp retry_delay(%SubscriptionState{retry_interval: retry_interval, retry_attempt: attempt}) do
+    # Cap the exponent so a long outage never builds a huge number
+    min(retry_interval, @initial_retry_delay * Integer.pow(2, min(attempt, 30)))
+  end
+
+  defp schedule_retry(%SubscriptionState{} = data, delay) do
+    data = cancel_retry(data)
+
+    retry_timer_ref = :erlang.start_timer(delay, self(), :retry_catch_up)
 
     %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
   end
+
+  defp reset_retry_attempt(%SubscriptionState{} = data),
+    do: %SubscriptionState{data | retry_attempt: 0}
 
   defp cancel_retry(%SubscriptionState{retry_timer_ref: nil} = data), do: data
 

@@ -602,12 +602,71 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert {:ok, :ok} = Task.await(holder)
     end
 
-    test "waits the retry interval before reading again", context do
+    test "makes the first retry short instead of waiting out the whole retry interval", context do
       fsm =
         fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
 
       assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
-      refute_receive {:timeout, _ref, :retry_catch_up}, 300
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
+    end
+
+    test "caps the first retry delay at the retry interval", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 20)
+
+      log = capture_log([level: :warning], fn -> SubscriptionFsm.catch_up(fsm) end)
+
+      assert log =~ "retrying in 20ms"
+    end
+
+    test "logs the delay the retry actually waits", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
+
+      log = capture_log([level: :warning], fn -> SubscriptionFsm.catch_up(fsm) end)
+
+      assert log =~ "retrying in 100ms"
+    end
+
+    test "doubles the retry delay on consecutive failures up to the retry interval", context do
+      failed = failed_read(context, retry_interval: 250)
+
+      {delays, _fsm} =
+        Enum.map_reduce(1..4, failed, fn _attempt, %SubscriptionFsm{data: data} = fsm ->
+          %SubscriptionState{retry_timer_ref: ref} = data
+          delay = Process.read_timer(ref)
+          Process.cancel_timer(ref)
+
+          {delay, SubscriptionFsm.retry_catch_up(fsm, ref)}
+        end)
+
+      assert [first, second, third, fourth] = delays
+      assert first in 1..100
+      assert second in 101..200
+      assert third in 201..250
+      assert fourth in 201..250
+    end
+
+    test "starts the retry delay over after a read succeeds", context do
+      failed = failed_read(context, retry_interval: 5_000)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = failed
+      Process.cancel_timer(ref)
+      failed_again = SubscriptionFsm.retry_catch_up(failed, ref)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = failed_again
+      Process.cancel_timer(ref)
+
+      recovered = failed_again |> recover_schema(context) |> SubscriptionFsm.retry_catch_up(ref)
+      assert %SubscriptionFsm{state: :subscribed} = recovered
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               recovered
+               |> SubscriptionFsm.catch_up()
+               |> break_schema()
+               |> SubscriptionFsm.catch_up()
+
+      assert Process.read_timer(ref) in 1..100
     end
 
     test "reads again on a catch-up request instead of waiting out the retry", context do
@@ -621,15 +680,36 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
     end
 
-    test "reads again on a notification of new events instead of waiting out the retry",
+    test "records a notification of new events without reading while a retry is pending",
          context do
-      failed = failed_read(context)
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+        failed = failed_read(context)
 
       :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
       {:ok, events} = TestEventStore.read_stream_forward(context.stream_uuid)
 
+      notified = failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+
+      assert %SubscriptionFsm{state: :catching_up, data: %SubscriptionState{} = data} = notified
+      assert data.retry_timer_ref == ref
+      assert data.last_received == 2
+      assert data.last_sent == 0
+      refute_received {:events, _events}
+    end
+
+    test "delivers events recorded by a notification when the retry fires", context do
+      failed = failed_read(context, retry_interval: 20)
+
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
+      {:ok, events} = TestEventStore.read_stream_forward(context.stream_uuid)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+        notified = failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+
+      assert_receive {:timeout, ^ref, :retry_catch_up}, 1_000
+
       assert %SubscriptionFsm{state: :request_catch_up} =
-               failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+               SubscriptionFsm.retry_catch_up(notified, ref)
 
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
     end
@@ -669,6 +749,26 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
       assert data.retry_timer_ref == nil
       refute_receive {:timeout, _ref, :retry_catch_up}, 400
+    end
+
+    test "starts the retry delay over after the subscription loses its lock", context do
+      lock_ref = make_ref()
+
+      failed = failed_read(context, retry_interval: 60_000)
+
+      %SubscriptionFsm{data: %SubscriptionState{} = data} =
+        failed = SubscriptionFsm.catch_up(failed)
+
+      failed = %SubscriptionFsm{failed | data: %SubscriptionState{data | lock_ref: lock_ref}}
+
+      %SubscriptionFsm{data: %SubscriptionState{} = data} =
+        SubscriptionFsm.disconnect(failed, lock_ref)
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               SubscriptionFsm.catch_up(%SubscriptionFsm{state: :request_catch_up, data: data})
+
+      assert Process.read_timer(ref) in 1..100
+      Process.cancel_timer(ref)
     end
 
     test "waits on in-flight events without a pending retry", context do
@@ -733,6 +833,10 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
   defp recover_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm, context) do
     %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+  end
+
+  defp break_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm) do
+    %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: "no_such_schema"}}
   end
 
   defp in_flight_fsm(context, count, overrides) do

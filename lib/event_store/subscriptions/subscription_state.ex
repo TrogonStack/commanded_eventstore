@@ -34,6 +34,7 @@ defmodule EventStore.Subscriptions.SubscriptionState do
     checkpoint_threshold: 1,
     checkpoint_timer_ref: nil,
     retry_timer_ref: nil,
+    retry_attempt: 0,
     checkpoints_pending: 0,
     checkpoint_unwritten: false,
     subscribers: %{},
