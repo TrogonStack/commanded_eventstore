@@ -11,6 +11,11 @@ defmodule EventStore.Storage.LockTest do
     assert :ok = Lock.try_acquire_exclusive_lock(conn, random_key(), schema: schema)
   end
 
+  test "a session lock attempt returns the database error", %{conn: conn} do
+    assert {:error, %Postgrex.Error{}} =
+             Lock.try_acquire_exclusive_lock(conn, 1, schema: "no_such_schema")
+  end
+
   test "acquire and release lock by connection", %{
     postgrex_config: postgrex_config,
     schema: schema
