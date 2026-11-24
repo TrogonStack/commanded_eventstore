@@ -602,12 +602,30 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert {:ok, :ok} = Task.await(holder)
     end
 
-    test "waits the retry interval before reading again", context do
+    test "makes the first retry short instead of waiting out the whole retry interval", context do
       fsm =
         fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
 
       assert %SubscriptionFsm{state: :catching_up} = SubscriptionFsm.catch_up(fsm)
-      refute_receive {:timeout, _ref, :retry_catch_up}, 300
+      assert_receive {:timeout, _ref, :retry_catch_up}, 1_000
+    end
+
+    test "caps the first retry delay at the retry interval", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 20)
+
+      log = capture_log([level: :warning], fn -> SubscriptionFsm.catch_up(fsm) end)
+
+      assert log =~ "retrying in 20ms"
+    end
+
+    test "logs the delay the retry actually waits", context do
+      fsm =
+        fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
+
+      log = capture_log([level: :warning], fn -> SubscriptionFsm.catch_up(fsm) end)
+
+      assert log =~ "retrying in 100ms"
     end
 
     test "reads again on a catch-up request instead of waiting out the retry", context do
