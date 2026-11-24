@@ -86,7 +86,7 @@ EventStore is [available in Hex](https://hex.pm/packages/eventstore) and can be 
 
       Subscription options:
 
-      - `:subscription_retry_interval` - interval between a subscription's attempts to take its lock, and between its attempts to read again after a catch-up read fails (default: 60,000ms). A failed read is logged as a warning, and a catch-up request or a notification of new events makes the subscription read again without waiting out the interval.
+      - `:subscription_retry_interval` - interval between a subscription's attempts to take its lock, and the longest delay between its attempts to read again after a catch-up read fails (default: 60,000ms). The first read retry fires after 100ms and the delay doubles on each consecutive failure up to this interval, then starts over after a successful read. A failed read is logged as a warning with the delay used. While a retry is pending, notifications of new events and acknowledgements are recorded without reading; a catch-up request still reads at once.
       - `:subscription_hibernate_after` - subscriptions will automatically hibernate to save memory after a period of inactivity (default: 15,000ms).
 
   4. Add your event store module to the `event_stores` list for your app in mix config:
