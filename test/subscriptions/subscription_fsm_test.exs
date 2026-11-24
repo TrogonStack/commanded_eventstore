@@ -602,6 +602,31 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert {:ok, :ok} = Task.await(holder)
     end
 
+    test "waits before retrying a read that the pool dropped", context do
+      %{conn: conn} = context
+      fsm = fsm(context, state: :request_catch_up, retry_interval: 5_000, query_timeout: 100)
+      test_pid = self()
+
+      holder =
+        Task.async(fn ->
+          Postgrex.transaction(conn, fn _held ->
+            send(test_pid, :connection_held)
+            receive do: (:release -> :ok)
+          end)
+        end)
+
+      assert_receive :connection_held, 5_000
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               SubscriptionFsm.catch_up(fsm)
+
+      assert Process.read_timer(ref) in 1..100
+      Process.cancel_timer(ref)
+
+      send(holder.pid, :release)
+      assert {:ok, :ok} = Task.await(holder, 10_000)
+    end
+
     test "makes the first retry short instead of waiting out the whole retry interval", context do
       fsm =
         fsm(context, state: :request_catch_up, schema: "no_such_schema", retry_interval: 5_000)
@@ -667,6 +692,17 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
                |> SubscriptionFsm.catch_up()
 
       assert Process.read_timer(ref) in 1..100
+    end
+
+    test "keeps doubling the retry delay past one second when the retry interval allows",
+         context do
+      failed = failed_read(context, retry_interval: 5_000)
+
+      fifth = failed |> fail_again() |> fail_again() |> fail_again() |> fail_again()
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = fifth
+      assert Process.read_timer(ref) in 1_501..1_600
+      Process.cancel_timer(ref)
     end
 
     test "reads again on a catch-up request instead of waiting out the retry", context do
@@ -829,6 +865,13 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
     )
     |> SubscriptionFsm.connect_subscriber(self(), buffer_size: 10)
     |> SubscriptionFsm.catch_up()
+  end
+
+  # Runs the pending retry now instead of waiting for its timer.
+  defp fail_again(%SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = fsm) do
+    Process.cancel_timer(ref)
+
+    SubscriptionFsm.retry_catch_up(fsm, ref)
   end
 
   defp recover_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm, context) do
