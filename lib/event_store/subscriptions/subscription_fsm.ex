@@ -369,6 +369,7 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
       |> purge_in_flight_events()
       # A retry left over from before the lock was lost would hold back acks after reconnecting.
       |> cancel_retry()
+      |> reset_retry_attempt()
 
     %__MODULE__{fsm | state: :disconnected, data: data}
   end
