@@ -237,6 +237,64 @@ defmodule EventStore.Subscriptions.SubscriptionCatchUpRetryTest do
     %SubscriptionFsm{state: Keyword.get(overrides, :state, :subscribed), data: data}
   end
 
+  test "delivers an event appended during a failed read soon after the read recovers" do
+    stream_uuid = UUID.uuid4()
+
+    {:ok, subscription} =
+      TestEventStore.subscribe_to_stream(stream_uuid, UUID.uuid4(), self(),
+        buffer_size: 10,
+        checkpoint_threshold: 1_000,
+        retry_interval: 60_000
+      )
+
+    assert_receive {:subscribed, ^subscription}
+
+    schema = put_schema(subscription, "no_such_schema")
+
+    GenServer.cast(subscription, :catch_up)
+    :ok = TestEventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(1))
+    refute_receive {:events, _events}, 50
+
+    put_schema(subscription, schema)
+
+    assert_receive {:events, [%RecordedEvent{event_number: 1}]}, 2_000
+  end
+
+  test "resumes an ack-blocked backlog soon after a failed read recovers" do
+    stream_uuid = UUID.uuid4()
+    :ok = TestEventStore.append_to_stream(stream_uuid, 0, EventFactory.create_events(30))
+
+    {:ok, subscription} =
+      TestEventStore.subscribe_to_stream(stream_uuid, UUID.uuid4(), self(),
+        buffer_size: 10,
+        max_size: 5,
+        checkpoint_threshold: 1_000,
+        retry_interval: 60_000
+      )
+
+    assert_receive {:subscribed, ^subscription}
+    assert_receive {:events, first}, 2_000
+
+    schema = put_schema(subscription, "no_such_schema")
+    :ok = TestEventStore.ack(subscription, first)
+
+    Process.send_after(self(), :recover, 150)
+    assert_receive :recover, 1_000
+    put_schema(subscription, schema)
+
+    last = receive_and_ack(subscription, List.last(first).event_number)
+    assert last == 30
+  end
+
+  defp receive_and_ack(_subscription, 30), do: 30
+
+  defp receive_and_ack(subscription, _last) do
+    assert_receive {:events, events}, 2_000
+    :ok = TestEventStore.ack(subscription, events)
+
+    receive_and_ack(subscription, List.last(events).event_number)
+  end
+
   defp put_schema(subscription, schema) do
     me = self()
 
