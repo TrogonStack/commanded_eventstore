@@ -549,13 +549,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         %__MODULE__{fsm | state: :subscribed, data: data}
 
       {:error, error} ->
+        delay = retry_delay(data)
+
         Logger.warning(
           describe(data) <>
-            " failed to catch up, retrying in #{data.retry_interval}ms due to: " <> inspect(error)
+            " failed to catch up, retrying in #{delay}ms due to: " <> inspect(error)
         )
 
-        # A failed read says nothing about the stream, so wait out the retry interval and read again
-        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data)}
+        # A failed read says nothing about the stream, so read again shortly
+        %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data, delay)}
     end
   end
 
@@ -563,10 +565,15 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     %__MODULE__{fsm | state: :catching_up, data: data}
   end
 
-  defp schedule_retry(%SubscriptionState{} = data) do
-    %SubscriptionState{retry_interval: retry_interval} = data = cancel_retry(data)
+  @initial_retry_delay 100
 
-    retry_timer_ref = :erlang.start_timer(retry_interval, self(), :retry_catch_up)
+  defp retry_delay(%SubscriptionState{retry_interval: retry_interval}),
+    do: min(retry_interval, @initial_retry_delay)
+
+  defp schedule_retry(%SubscriptionState{} = data, delay) do
+    data = cancel_retry(data)
+
+    retry_timer_ref = :erlang.start_timer(delay, self(), :retry_catch_up)
 
     %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
   end
