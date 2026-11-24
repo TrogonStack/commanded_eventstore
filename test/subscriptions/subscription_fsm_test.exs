@@ -647,6 +647,28 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert fourth in 201..250
     end
 
+    test "starts the retry delay over after a read succeeds", context do
+      failed = failed_read(context, retry_interval: 5_000)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = failed
+      Process.cancel_timer(ref)
+      failed_again = SubscriptionFsm.retry_catch_up(failed, ref)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} = failed_again
+      Process.cancel_timer(ref)
+
+      recovered = failed_again |> recover_schema(context) |> SubscriptionFsm.retry_catch_up(ref)
+      assert %SubscriptionFsm{state: :subscribed} = recovered
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               recovered
+               |> SubscriptionFsm.catch_up()
+               |> break_schema()
+               |> SubscriptionFsm.catch_up()
+
+      assert Process.read_timer(ref) in 1..100
+    end
+
     test "reads again on a catch-up request instead of waiting out the retry", context do
       failed = failed_read(context)
 
@@ -770,6 +792,10 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
 
   defp recover_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm, context) do
     %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: context.schema}}
+  end
+
+  defp break_schema(%SubscriptionFsm{data: %SubscriptionState{} = data} = fsm) do
+    %SubscriptionFsm{fsm | data: %SubscriptionState{data | schema: "no_such_schema"}}
   end
 
   defp in_flight_fsm(context, count, overrides) do
