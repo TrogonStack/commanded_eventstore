@@ -536,8 +536,6 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         end
 
       {:error, :stream_deleted} ->
-        data = reset_retry_attempt(data)
-
         # Don't allow subscriptions to deleted streams to receive any events
         %__MODULE__{fsm | state: :unsubscribed, data: data}
 
