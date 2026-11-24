@@ -521,6 +521,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
     case read_stream_forward(data) do
       {:ok, []} ->
+        data = reset_retry_attempt(data)
+
         if last_sent == last_received do
           # Subscriber is up-to-date with latest published events
           %__MODULE__{fsm | state: :subscribed, data: data}
@@ -530,6 +532,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         end
 
       {:ok, events} ->
+        data = reset_retry_attempt(data)
+
         data = data |> enqueue_events(events) |> notify_subscribers()
 
         if empty_queue?(data) do
@@ -541,10 +545,14 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         end
 
       {:error, :stream_deleted} ->
+        data = reset_retry_attempt(data)
+
         # Don't allow subscriptions to deleted streams to receive any events
         %__MODULE__{fsm | state: :unsubscribed, data: data}
 
       {:error, :stream_not_found} ->
+        data = reset_retry_attempt(data)
+
         # Allow subscriptions to streams which don't yet exist, but might be created later
         %__MODULE__{fsm | state: :subscribed, data: data}
 
@@ -581,6 +589,9 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
     %SubscriptionState{data | retry_timer_ref: retry_timer_ref}
   end
+
+  defp reset_retry_attempt(%SubscriptionState{} = data),
+    do: %SubscriptionState{data | retry_attempt: 0}
 
   defp cancel_retry(%SubscriptionState{retry_timer_ref: nil} = data), do: data
 
