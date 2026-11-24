@@ -335,18 +335,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
     end
   end
 
-  # New events are a reason to try again now rather than wait out a failed read's retry.
-  def notify_events(
-        %__MODULE__{state: :catching_up, data: %SubscriptionState{retry_timer_ref: ref} = data} =
-          fsm,
-        events
-      )
-      when is_reference(ref) do
-    data = data |> track_last_received(events) |> cancel_retry()
-
-    catch_up_from_stream(fsm, data)
-  end
-
+  # While a failed read has a retry pending, new events are only recorded: the retry reads them,
+  # so a busy stream cannot turn every notification into another failing read.
   # Ignore notify events unless subscribed
   def notify_events(%__MODULE__{data: %SubscriptionState{} = data} = fsm, events) do
     %__MODULE__{fsm | data: track_last_received(data, events)}
