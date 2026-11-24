@@ -557,6 +557,8 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
         )
 
         # A failed read says nothing about the stream, so read again shortly
+        data = %SubscriptionState{data | retry_attempt: data.retry_attempt + 1}
+
         %__MODULE__{fsm | state: :catching_up, data: schedule_retry(data, delay)}
     end
   end
@@ -567,8 +569,10 @@ defmodule EventStore.Subscriptions.SubscriptionFsm do
 
   @initial_retry_delay 100
 
-  defp retry_delay(%SubscriptionState{retry_interval: retry_interval}),
-    do: min(retry_interval, @initial_retry_delay)
+  defp retry_delay(%SubscriptionState{retry_interval: retry_interval, retry_attempt: attempt}) do
+    # Cap the exponent so a long outage never builds a huge number
+    min(retry_interval, @initial_retry_delay * Integer.pow(2, min(attempt, 30)))
+  end
 
   defp schedule_retry(%SubscriptionState{} = data, delay) do
     data = cancel_retry(data)
