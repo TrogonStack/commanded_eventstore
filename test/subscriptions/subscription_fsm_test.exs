@@ -628,6 +628,25 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert log =~ "retrying in 100ms"
     end
 
+    test "doubles the retry delay on consecutive failures up to the retry interval", context do
+      failed = failed_read(context, retry_interval: 250)
+
+      {delays, _fsm} =
+        Enum.map_reduce(1..4, failed, fn _attempt, %SubscriptionFsm{data: data} = fsm ->
+          %SubscriptionState{retry_timer_ref: ref} = data
+          delay = Process.read_timer(ref)
+          Process.cancel_timer(ref)
+
+          {delay, SubscriptionFsm.retry_catch_up(fsm, ref)}
+        end)
+
+      assert [first, second, third, fourth] = delays
+      assert first in 1..100
+      assert second in 101..200
+      assert third in 201..250
+      assert fourth in 201..250
+    end
+
     test "reads again on a catch-up request instead of waiting out the retry", context do
       failed = failed_read(context)
 
