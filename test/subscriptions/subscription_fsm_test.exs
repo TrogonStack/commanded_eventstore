@@ -680,15 +680,36 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
     end
 
-    test "reads again on a notification of new events instead of waiting out the retry",
+    test "records a notification of new events without reading while a retry is pending",
          context do
-      failed = failed_read(context)
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+        failed = failed_read(context)
 
       :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
       {:ok, events} = TestEventStore.read_stream_forward(context.stream_uuid)
 
+      notified = failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+
+      assert %SubscriptionFsm{state: :catching_up, data: %SubscriptionState{} = data} = notified
+      assert data.retry_timer_ref == ref
+      assert data.last_received == 2
+      assert data.last_sent == 0
+      refute_received {:events, _events}
+    end
+
+    test "delivers events recorded by a notification when the retry fires", context do
+      failed = failed_read(context, retry_interval: 20)
+
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(2))
+      {:ok, events} = TestEventStore.read_stream_forward(context.stream_uuid)
+
+      %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+        notified = failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+
+      assert_receive {:timeout, ^ref, :retry_catch_up}, 1_000
+
       assert %SubscriptionFsm{state: :request_catch_up} =
-               failed |> recover_schema(context) |> SubscriptionFsm.notify_events(events)
+               SubscriptionFsm.retry_catch_up(notified, ref)
 
       assert_received {:events, [%{event_number: 1}, %{event_number: 2}]}
     end
