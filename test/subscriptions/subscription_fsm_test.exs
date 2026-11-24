@@ -705,6 +705,41 @@ defmodule EventStore.Subscriptions.SubscriptionFsmTest do
       Process.cancel_timer(ref)
     end
 
+    test "starts the retry delay over after a read finds no new events", context do
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
+
+      failed =
+        failed_read(context, retry_interval: 5_000, last_received: 3, last_sent: 3, last_ack: 3)
+
+      recovered = failed |> fail_again() |> recover_schema(context) |> fail_again()
+      assert %SubscriptionFsm{state: :subscribed} = recovered
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               recovered
+               |> SubscriptionFsm.catch_up()
+               |> break_schema()
+               |> SubscriptionFsm.catch_up()
+
+      assert Process.read_timer(ref) in 1..100
+      Process.cancel_timer(ref)
+    end
+
+    test "starts the retry delay over after a read delivers events", context do
+      failed = failed_read(context, retry_interval: 5_000) |> fail_again()
+
+      :ok = TestEventStore.append_to_stream(context.stream_uuid, 0, EventFactory.create_events(3))
+
+      recovered = failed |> recover_schema(context) |> fail_again()
+      assert %SubscriptionFsm{state: :request_catch_up} = recovered
+      assert_received {:events, [%{event_number: 1}, %{event_number: 2}, %{event_number: 3}]}
+
+      assert %SubscriptionFsm{data: %SubscriptionState{retry_timer_ref: ref}} =
+               recovered |> break_schema() |> SubscriptionFsm.catch_up()
+
+      assert Process.read_timer(ref) in 1..100
+      Process.cancel_timer(ref)
+    end
+
     test "reads again on a catch-up request instead of waiting out the retry", context do
       failed = failed_read(context)
 
